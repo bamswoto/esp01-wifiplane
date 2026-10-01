@@ -18,6 +18,56 @@ Kode hasil modifikasi untuk ESP-12E yang menjalankan [WIFI-CONTROLLED-RC-PLANE](
 
 * Build ulang aplikasi dari `ProcessingAndroidApp/wifiplane/wifiplane.pde` di Processing (mode Android). File `wifiplane.apk` bawaan adalah versi lama dan tidak bisa dipakai dengan firmware ini. Izin yang dibutuhkan aplikasi ada di `AndroidManifest.xml`, dan izin yang kurang ditampilkan di layar. File itu juga berisi `android:configChanges` supaya aplikasi tidak restart saat ganti mode MIRING / MANUAL. Kalau Anda menyalin kode ke sketch sendiri, salin juga `AndroidManifest.xml` ke folder sketch itu (atau tambahkan atribut `android:configChanges` dari file ini ke `<activity>` di manifest Anda). Tanpa itu, ganti mode tetap jalan tapi Android membuat ulang aplikasi, sehingga BG/EX kembali ke BG (trim tetap, karena disimpan).
 
+**Flashing ke ESP-12E (Flash Size 4MB, FS:1MB OTA:~1019KB)**
+
+Flashing pertama lewat flasher/burner USB, sekali saja. Setelah itu semua update lewat OTA.
+
+1. Siapkan Arduino IDE:
+   * File > Preferences > Additional boards manager URLs: `https://arduino.esp8266.com/stable/package_esp8266com_index.json`
+   * Tools > Board > Boards Manager: pasang **esp8266 by ESP8266 Community versi 3.1.2** (versi yang dipakai untuk meng-compile dan menguji firmware ini). ESP8266WiFi, ArduinoOTA dan LittleFS sudah termasuk; tidak perlu library lain.
+   * Di Linux/macOS, pastikan `python3` terpasang: core 3.1.2 memakainya untuk compile dan upload (di Windows sudah dibawa oleh core).
+
+2. Buka `Arduino/wifiplane_esp8266/wifiplane_esp8266.ino` dan isi pengaturan di bagian **Sebelum flashing**.
+
+3. Pengaturan menu Tools:
+
+   | Menu | Pilihan |
+   |---|---|
+   | Board | Generic ESP8266 Module (atau NodeMCU 1.0 (ESP-12E Module); keduanya menghasilkan firmware yang setara) |
+   | Flash Size | **4MB (FS:1MB OTA:~1019KB)** |
+   | Flash Mode | DIO |
+   | Flash Frequency | 40MHz |
+   | CPU Frequency | 80 MHz |
+   | Crystal Frequency | 26 MHz |
+   | Reset Method | dtr (aka nodemcu) |
+   | Upload Speed | 115200 (921600 kalau flasher Anda sanggup) |
+   | Erase Flash | **All Flash Contents** untuk flashing USB pertama, setelah itu Only Sketch |
+
+   Pada Generic ESP8266 Module, yang wajib diubah dari default hanya **Flash Size** (default 1MB) dan **Flash Mode** (default DOUT; DIO adalah mode yang dipakai ESP-12E, sama dengan NodeMCU), plus Erase Flash untuk flashing pertama. Pilihan lain di tabel sudah default; menu lain biarkan default.
+
+4. Flashing pertama (USB):
+   * Hubungkan ESP-12E ke flasher: TX flasher ke RX ESP, RX flasher ke TX ESP, GND bersama, catu 3,3 V. Agar masuk mode flash, saat ESP dinyalakan atau di-reset: GPIO0 = LOW, GPIO15 = LOW, GPIO2 = HIGH, EN = HIGH. Flasher/burner ESP-12 biasanya sudah mengatur ini; kalau flasher Anda pakai tombol, tahan FLASH (GPIO0), tekan RESET, lalu lepas keduanya.
+   * Pilih port flasher di Tools > Port, lalu Upload.
+   * Kalau setelah upload ESP belum berjalan, tekan RESET atau cabut-pasang daya tanpa menahan FLASH.
+   * File system tidak perlu di-upload. LittleFS diformat otomatis saat pertama kali dipakai (core 3.1.2: auto-format aktif secara default).
+
+5. Update berikutnya (OTA):
+   * Nyalakan pesawat di rumah sampai tersambung ke WiFi rumah (3 bip), pastikan aplikasi remote tertutup, lalu tunggu sekitar 10 detik.
+   * Tools > Port: pilih port jaringan `wifiplane-ota at 192.168.x.x` (PC harus satu jaringan dengan pesawat). Kalau belum muncul, tunggu sebentar atau buka ulang menu Port.
+   * Upload, lalu masukkan `OTA_PASSWORD` saat diminta. Menu Erase Flash tidak berpengaruh untuk OTA.
+   * **Pengaturan Tools harus sama dengan flashing pertama, terutama Flash Size.** Kalau Flash Size diganti, lokasi file system berubah: salinan rollback hilang (file system diformat ulang), atau rollback nonaktif kalau memilih ukuran tanpa FS.
+   * Jangan cabut daya sekitar 10 detik setelah upload selesai, saat bootloader menyalin firmware baru.
+   * Setelah upload firmware baru, biarkan pesawat menyala sekitar 2 menit dengan aplikasi tertutup supaya salinan versi baik tersimpan (lihat **Rollback**).
+
+6. Cek setelah flashing: 3 bip = tersambung ke `ssid_sta` (mode STA); 2 bip = menjadi AP `wifiplane` (mode AP).
+
+Kenapa 4MB (FS:1MB OTA:~1019KB):
+
+* Firmware boleh sampai sekitar 1019 KB. Firmware ini sekarang sekitar 349 KB (356.960 byte, hasil compile dengan pengaturan di atas).
+* Ruang OTA: firmware baru ditulis dulu ke flash yang kosong, jadi upload yang gagal tidak merusak firmware yang sedang jalan.
+* File system LittleFS 1 MB (0x300000–0x3FA000, 1000 KB) untuk salinan rollback. Saat menyimpan salinan baru, salinan lama dan baru sempat ada bersamaan (sekitar 2 × 349 KB), jadi masih muat. Kalau kelak firmware lebih besar dari sekitar 480 KB, salinan baru tidak muat dan pesawat tetap memakai salinan lama.
+* Pilihan tanpa file system (misalnya "4MB (FS:none OTA:~1019KB)") tetap bisa dipakai, tapi rollback nonaktif.
+
 **Mode WiFi**
 
 * Saat dinyalakan, pesawat mencoba tersambung ke `ssid_sta` (WiFi rumah atau hotspot HP) sampai 20 detik (`STA_TUNGGU_MS`, 3 bip kalau berhasil), supaya router yang lambat tidak membuat pesawat masuk mode AP.
@@ -40,7 +90,7 @@ Kode hasil modifikasi untuk ESP-12E yang menjalankan [WIFI-CONTROLLED-RC-PLANE](
 
 * Upload OTA yang gagal (koneksi putus, password salah, MD5 tidak cocok, baterai dicabut saat upload) tidak pernah menyentuh firmware yang sedang berjalan: image baru ditulis dulu ke flash yang kosong dan baru disalin setelah MD5-nya cocok. Jangan cabut daya sekitar 10 detik setelah upload selesai, saat bootloader menyalinnya.
 
-* Untuk upload yang berhasil tapi firmware-nya crash, pesawat menyimpan salinan firmware baik terakhir. Pilih Flash Size yang punya file system di Arduino IDE, misalnya "4MB (FS:1MB OTA:~1019KB)". Tanpa file system, rollback nonaktif dan crash berulang hanya berujung ke mode aman.
+* Untuk upload yang berhasil tapi firmware-nya crash, pesawat menyimpan salinan firmware baik terakhir. Pakai Flash Size "4MB (FS:1MB OTA:~1019KB)" (lihat **Flashing ke ESP-12E**). Tanpa file system, rollback nonaktif dan crash berulang hanya berujung ke mode aman.
 
 * Firmware yang sudah berjalan 2 menit tanpa crash (`VERSI_BAIK_MS`) disalin ke file system, sekali per versi, hanya saat aplikasi remote tertutup. Pada crash ke-3 berturut-turut, pesawat memasang salinan itu (dicek MD5) lalu restart dengannya. Kalau tidak ada salinan, atau salinannya justru versi yang crash, pesawat masuk mode aman.
 
