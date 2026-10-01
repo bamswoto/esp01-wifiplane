@@ -20,6 +20,14 @@
 // HP miring kiri -> motor kanan lebih kencang -> pesawat belok kiri.
 #define MOTOR_KANAN 4
 #define MOTOR_KIRI  5
+
+// Frekuensi PWM motor saat terbang (Hz). Default core 1 kHz terdengar sebagai dengingan dari
+// motor coreless; 20 kHz di atas batas pendengaran. Bunyi bip saat menyala tetap memakai
+// frekuensi rendah, baru setelah bip koneksi (3x STA / 2x AP) PWM pindah ke frekuensi ini.
+// PWM ESP8266 dibuat software: frekuensi tinggi menambah beban CPU (dokumentasi core).
+// Tanpa dioda flyback (Schottky) di tiap motor, MOSFET lebih panas di frekuensi tinggi.
+// Isi 1000 untuk kembali ke perilaku lama.
+#define PWM_FREQ_TERBANG 20000
 #define DC_RSSI 1000   // interval telemetri (ms), sejalan dengan jendela LQ 1 detik
 #define DC_RX   900    // failsafe: motor mati jika tidak ada paket valid > 900 ms
 
@@ -496,6 +504,9 @@ void setup() {
     usingSTA = false;
     playKoneksiSound(2);   // 2 bip = mode AP fallback aktif
   }
+
+  // Bip selesai: PWM terbang di atas batas pendengaran, motor coreless tidak berdenging
+  analogWriteFreq(PWM_FREQ_TERBANG);
 
   Udp.begin(localPort);
 

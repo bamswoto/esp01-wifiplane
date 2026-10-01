@@ -10,6 +10,10 @@ Kode hasil modifikasi untuk ESP-12E yang menjalankan [WIFI-CONTROLLED-RC-PLANE](
 
 * Tegangan baterai dibaca di A0 lewat pembagi tegangan 33k / 8.2k.
 
+* PWM motor: bip saat menyala memakai nada yang terdengar (nada startup, lalu bip koneksi 1 kHz). Setelah bip koneksi selesai, PWM pindah ke 20 kHz (`PWM_FREQ_TERBANG`), di atas batas pendengaran, supaya motor coreless tidak berdenging saat terbang. Yang masih terdengar adalah suara putaran motor dan baling-baling. Isi `1000` untuk kembali ke perilaku lama.
+
+* Skema asli tidak punya dioda flyback di motor. Disarankan memasang dioda Schottky (misalnya SS14 atau B5819W) paralel dengan tiap motor: katoda ke + baterai, anoda ke kaki motor yang tersambung ke drain MOSFET. Tanpa dioda, MOSFET menahan lonjakan tegangan setiap kali mati, dan di 20 kHz itu terjadi 20 kali lebih sering daripada di 1 kHz. Setelah uji gas penuh di darat (baling-baling dilepas), raba MOSFET: kalau terlalu panas dan belum ada dioda, pasang dioda atau turunkan `PWM_FREQ_TERBANG`.
+
 **Sebelum flashing**
 
 * Di sketch, isi `ssid_sta` / `pass_sta` (WiFi rumah untuk OTA, atau hotspot HP), `pass_ap` (minimal 8 karakter) dan `OTA_PASSWORD`. Jangan commit password asli.
