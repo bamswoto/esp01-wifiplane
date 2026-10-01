@@ -1,154 +1,665 @@
-//**************************************************
-// WiFi Controlled Tiny Airplane
-// Android App Processing file
-// By Ravi Butani
-// Rajkot INDIA
-// Instructables page:https://www.instructables.com/id/WIFI-CONTROLLED-RC-PLANE/
 //***************************************************
-import hypermedia.net.*; // import UDP library
-import ketai.sensors.*;  // import Ketai Sensor library
+// WiFi Controlled Tiny Airplane - Android Controller
+// PROFIL JANGKAUAN MAKSIMUM (latensi boleh lebih tinggi)
+// Background sender thread (~250 Hz) + buffer reuse
+// ELRS-style Packet Integrity (CRC8, nilai awal = BIND_ID) + nomor urut 16-bit
+// Paket kendali (6 byte): [0xEA, SEQ lo, SEQ hi, PWM L, PWM R, CRC8]
+// Discovery: IP FC diambil dari telemetri valid
+// Mode kirim (toggle area kanan-tengah):
+//   BC = broadcast ke subnet FC  (mode STA/hotspot: frame grup, tanpa retry MAC. Tidak ditahan
+//        sampai beacon DTIM selama FC tidak sleep dan tidak ada perangkat lain di hotspot)
+//   UC = unicast ke IP FC        (ACK + retry MAC)
+// Gas: jari lepas = gas 0 (safety saat pesawat jatuh). Tombol HOLD (kanan-bawah)
+//   menahan gas supaya trim bisa diatur; tekan HOLD lagi = HOLD mati + gas 0.
+//   Gas 0 = kedua motor mati, kemiringan HP dan trim tidak memutar motor.
+// Jaringan Wi-Fi tanpa internet (AP FC) di-request agar tidak dilepas sistem,
+// dan socket kirim di-bind ke jaringan itu (tetap jalan walau data seluler ON)
+// Izin (Android > Sketch Permissions): INTERNET, VIBRATE, WAKE_LOCK, ACCESS_WIFI_STATE,
+//   CHANGE_WIFI_MULTICAST_STATE, ACCESS_NETWORK_STATE, CHANGE_NETWORK_STATE
+//   Izin yang kurang ditampilkan di layar.
+//***************************************************
+
+import hypermedia.net.*;
+import ketai.sensors.*;
 import ketai.ui.*;
-import ketai.net.*;
 import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.wifi.WifiManager;
-import android.os.Build;
+import android.os.PowerManager;
 import android.view.WindowManager;
+import java.net.InetAddress;
+import java.net.Inet4Address;
+import java.net.InterfaceAddress;
+import java.net.NetworkInterface;
+import java.net.DatagramSocket;
+import java.net.DatagramPacket;
+import java.util.Collections;
 
-// ExpressLRS style link, see the plane firmware for the packet layout
-int PACKET_RATE_HZ = 50;           // fixed RC packet rate, sent from its own thread
-String BIND_PHRASE = "wifiplane";  // must match the plane firmware
-int LINK_LOST_MS = 1000;           // no telemetry for this long shows the link as lost
-int IP_UNLOCK_MS = 3000;           // no telemetry for this long goes back to broadcast
-int LQ_WARN = 50;                  // vibrate below this LQ % while activated
-byte P_ID = 1;
-byte PKT_RC = 1;
-byte PKT_TLM = 2;
-byte FLAG_ARMED = 1;
-int RC_PKT_LEN = 10;
-int TLM_PKT_LEN = 7;
-int crcSeed;
-int seq = 0;
+// =========================================================
+// BINDING: nilai awal CRC8, HARUS sama dengan BIND_ID di firmware FC
+// =========================================================
+final int BIND_ID = 0x5A;
 
-int app_start=1;
-volatile int lock = 0;
-volatile int gas = 0;
-volatile int rssi=0;
-volatile int lq=0;
-volatile int vcc=0;
-volatile int lastTlmMillis = -100000;
-volatile int lastDrawMillis = -100000;
-int lastVibeMillis = 0;
-UDP udp;             // define the UDP object
-KetaiSensor sensor;  // define the Ketai sensor object
-KetaiVibrate vibe;
-WifiManager.WifiLock wifiLock;
-volatile float accelerometerX;
-float accelerometerY, accelerometerZ;
+// Gain diferensial accelerometer per mode (dipakai saat start DAN saat toggle)
+final float DIFF_BG = 4.0;   // mode BG
+final float DIFF_EX = 7.0;   // mode EX
+
+// Peringatan getar
+final int VBAT_WARN     = 35;    // baterai < 3.5 V (FC memutus motor di 3.2 V)
+final int LQ_WARN       = 50;    // LQ < 50% saat ACTIVATED
+final int TLM_HILANG_MS = 2000;  // telemetri hilang > 2 detik = link putus
+
+// Setelah app ter-pause, kirim 0/0 selama ini lalu berhenti (FC failsafe sendiri)
+final int KIRIM_SETELAH_PAUSE_MS = 1000;
+
+// =========================================================
+// GLOBAL STATE
+// volatile: ditulis UI/callback thread, dibaca sender thread
+// =========================================================
+volatile int gas          = 0;
+volatile int lock         = 0;
+volatile boolean hold     = false;   // true = gas ditahan walau jari lepas (untuk atur trim)
+volatile int offsetl      = 0;
+volatile int offsetr      = 0;
+volatile float accelerometerX = 0;
+volatile float diff_power = DIFF_BG;
+
+// Mode kirim: true = BC (broadcast subnet FC), false = UC (unicast)
+volatile boolean kirimBroadcast = true;
+
+// State telemetri: ditulis receiver callback, dibaca UI thread
+volatile int rssi          = 0;
+volatile int vcc           = 0;
+volatile int lqFc          = 0;   // LQ % yang dihitung FC dari nomor urut paket
+volatile long lastTelemetryMs = -100000;
+
+// RSSI yang diukur HP sendiri (dipakai saat FC mode AP, yang mengirim RSSI 0)
+int  rssiHp     = 0;
+long lastRssiHp = 0;
+
+// Paket terkirim/detik dari HP (ditulis sender thread)
+volatile int txPerDetik = 0;
+
+// Discovery: IP FC dari telemetri valid terakhir (null = belum ditemukan)
+volatile InetAddress fcAddr = null;
+
+// Wi-Fi tanpa internet (AP FC) untuk bind socket kirim; null = tidak ada
+volatile Network wifiFC = null;
+volatile int netGen     = 0;   // naik tiap pilihan jaringan berubah -> socket kirim dibuat ulang
+ConnectivityManager connMgr;
+ConnectivityManager.NetworkCallback netCallback;
+
+// Flag kontrol sender thread
+volatile boolean senderRunning = false;
+volatile boolean appAktif      = true;   // false setelah onPause
+volatile long    pauseMs       = 0;
+Thread senderThread;
+
+// UI-only state
 int exprt_flag = 0;
-volatile float diff_power = 2.2;
-int remotPort = 6000;
-int localPort = 2390;
-volatile int offsetl = 0;
-volatile int offsetr = 0;
-volatile String remotIp = "255.255.255.255";  // the remote IP address
-volatile Boolean remotIpLock = false;
+long lastVib   = 0;
+volatile String peringatan = "";   // lock/izin yang gagal, ditampilkan di layar
 
-void getBroadcastAddress()
-{
-  String localIp[] = {"0","0","0","0"};
+// --- Konfigurasi jaringan ---
+int remotPort = 6000;               // port ESP8266
+int localPort = 2390;               // port HP (untuk terima telemetri)
 
-  if ( KetaiNet.getIP() != null)
-    localIp = split(KetaiNet.getIP(), ".");
-  println("My ip address is: " + localIp[0] + "." + localIp[1] + "." + localIp[2] + "." + localIp[3]);
-  remotIp = localIp[0] + "." + localIp[1] + "." + localIp[2] + ".255"; //build broadcast/multicast adddress
-  println("Broadcast address is: " + remotIp);
-}
+// --- Receiver (hypermedia UDP, port 2390) ---
+UDP udp;
 
-void setup()
-{
-  size(displayWidth,displayHeight);
+// --- Sensor & UI ---
+KetaiSensor sensor;
+KetaiVibrate vibe;
+
+// --- Locks ---
+WifiManager wifiMgr;
+WifiManager.WifiLock wifiLock;
+PowerManager.WakeLock wakeLock;
+WifiManager.MulticastLock multicastLock;
+
+// =========================================================
+// SETUP
+// =========================================================
+void setup() {
+  size(displayWidth, displayHeight);
   orientation(PORTRAIT);
+
   keepScreenOn();
-  createWifiLock();
-  crcSeed = bindSeed(BIND_PHRASE);
-  udp = new UDP( this, localPort );
-  udp.listen( true );
-  getBroadcastAddress();
+  setupPowerAndWifiLocks();
+  setupWifiBinding();
+
+  // --- Receiver via hypermedia UDP (telemetri + discovery FC) ---
+  udp = new UDP(this, localPort);
+  udp.listen(true);
+
+  // --- Sender thread (raw DatagramSocket, ~250 Hz) ---
+  senderRunning = true;
+  senderThread = new Thread(new Runnable() {
+    public void run() {
+      senderLoop();
+    }
+  }
+  );
+  senderThread.start();
+  println("Sender thread berjalan (~250 Hz)");
+
   sensor = new KetaiSensor(this);
-  vibe = new KetaiVibrate(this);
+  vibe   = new KetaiVibrate(this);
   sensor.start();
-  thread("sendLoop");
 }
 
-void draw()
-{
-  lastDrawMillis = millis();
+// =========================================================
+// SENDER LOOP (berjalan di background thread)
+// Tujuan kirim:
+//   - FC sudah ditemukan : BC -> broadcast subnet FC, UC -> IP FC
+//   - Belum ditemukan    : broadcast subnet Wi-Fi klien HP (FC mode AP);
+//                          kalau HP sedang jadi hotspot (FC mode STA), tidak kirim
+//                          dan menunggu telemetri broadcast dari FC (maks. ~1 detik)
+// =========================================================
+void senderLoop() {
+  DatagramSocket sock = null;
+  int sockGen = -1;
+
+  // Buffer & packet di-reuse (nol alokasi per iterasi)
+  final byte[] buf = new byte[6];
+  DatagramPacket pkt = new DatagramPacket(buf, buf.length);
+  pkt.setPort(remotPort);
+
+  InetAddress fallbackAddr = null;
+  long nextFallbackMs = 0;
+
+  InetAddress fcUntukBc = null;   // IP FC yang broadcast-nya sudah dihitung
+  InetAddress bcFc      = null;   // alamat broadcast subnet FC
+
+  int  seq         = 0;           // nomor urut 16-bit, naik tiap paket terkirim
+  int  txHitung    = 0;
+  long jendelaTxNs = System.nanoTime();
+
+  final long periodNs = 4000000L; // 4 ms = 250 Hz
+  long next = System.nanoTime();
+
+  while (senderRunning) {
+    try {
+      // --- (Re)buat socket bila pilihan jaringan berubah ---
+      int gen = netGen;
+      if (sock == null || gen != sockGen) {
+        if (sock != null) {
+          sock.close();
+          sock = null;
+        }
+        sock = buatSocketKirim();
+        sockGen = gen;
+      }
+
+      // --- Tentukan tujuan ---
+      InetAddress fa = fcAddr;
+      InetAddress target;
+      if (fa != null) {
+        if (kirimBroadcast) {
+          if (!fa.equals(fcUntukBc)) {
+            bcFc = broadcastUntuk(fa);
+            fcUntukBc = fa;
+          }
+          target = bcFc;
+        } else {
+          target = fa;
+        }
+      } else {
+        long nowMs = System.currentTimeMillis();
+        if (nowMs >= nextFallbackMs) {
+          fallbackAddr = getWifiBroadcastAddr();
+          nextFallbackMs = nowMs + 1000;
+        }
+        target = fallbackAddr;
+      }
+
+      // Setelah app ter-pause: kirim 0/0 sebentar (motor langsung mati), lalu berhenti
+      boolean kirim = appAktif || System.currentTimeMillis() - pauseMs < KIRIM_SETELAH_PAUSE_MS;
+
+      if (target != null && kirim) {
+        // --- Snapshot state (volatile read) lalu susun paket 6 byte ---
+        isiPaket(buf, seq, gas, offsetl, offsetr, accelerometerX, diff_power, lock);
+
+        // --- Kirim (buffer yang sama, packet yang sama) ---
+        pkt.setAddress(target);
+        sock.send(pkt);
+        seq = (seq + 1) & 0xFFFF;
+        txHitung++;
+      }
+
+      // --- Hitung paket terkirim per detik ---
+      long nowNs = System.nanoTime();
+      if (nowNs - jendelaTxNs >= 1000000000L) {
+        txPerDetik  = txHitung;
+        txHitung    = 0;
+        jendelaTxNs = nowNs;
+      }
+
+      // --- Jadwalkan iterasi berikutnya ---
+      next += periodNs;
+      long sleepNs = next - System.nanoTime();
+      if (sleepNs > 0) {
+        Thread.sleep(sleepNs / 1000000L, (int)(sleepNs % 1000000L));
+      } else {
+        next = System.nanoTime(); // tertinggal, reset jadwal
+      }
+    }
+    catch (InterruptedException ie) {
+      break;
+    }
+    catch (Exception e) {
+      // Kirim / buat socket gagal (mis. Wi-Fi putus): jeda dulu, jangan busy-spin
+      try {
+        Thread.sleep(20);
+      }
+      catch (InterruptedException ie2) {
+        break;
+      }
+      next = System.nanoTime();
+    }
+  }
+
+  if (sock != null && !sock.isClosed()) sock.close();
+}
+
+// =========================================================
+// PAKET KENDALI (6 byte): [0xEA, SEQ lo, SEQ hi, PWM L, PWM R, CRC8]
+// LOCK atau gas 0 = kedua motor 0 (kemiringan HP dan trim tidak memutar motor)
+// =========================================================
+void isiPaket(byte[] buf, int seq, int g, int ol, int orr, float ax, float dp, int lk) {
+  // --- Mixing seperti kode asli ---
+  int l_speed = (int)((float)g + (float)ol + ax * dp);
+  int r_speed = (int)((float)g + (float)orr - ax * dp);
+
+  int pwm_l = constrain(l_speed * 2, 0, 255);
+  int pwm_r = constrain(r_speed * 2, 0, 255);
+
+  buf[0] = (byte) 0xEA;   // Header
+  buf[1] = (byte) (seq & 0xFF);
+  buf[2] = (byte) ((seq >> 8) & 0xFF);
+  if (lk == 1 && g > 0) {
+    buf[3] = (byte) pwm_l;
+    buf[4] = (byte) pwm_r;
+  } else {
+    buf[3] = (byte) 0x00;
+    buf[4] = (byte) 0x00;
+  }
+  buf[5] = calculateCRC8(buf, 5);
+}
+
+// =========================================================
+// SOCKET KIRIM
+// Kalau ada Wi-Fi tanpa internet (AP FC), socket di-bind ke jaringan itu.
+// Tanpa bind, Android bisa merutekan paket lewat data seluler.
+// =========================================================
+DatagramSocket buatSocketKirim() throws Exception {
+  DatagramSocket s = new DatagramSocket();
+  try {
+    s.setBroadcast(true);        // eksplisit, untuk mode BC dan fallback broadcast
+    s.setSendBufferSize(2048);   // antrean kirim kecil: paket basi tidak menumpuk saat link lemah
+    Network n = wifiFC;
+    if (n != null && android.os.Build.VERSION.SDK_INT >= 23) {
+      n.bindSocket(s);
+    }
+  }
+  catch (Exception e) {
+    s.close();
+    throw e;
+  }
+  return s;
+}
+
+// =========================================================
+// ALAMAT BROADCAST SUBNET FC
+// Dicari dari interface lokal yang subnetnya memuat IP FC (hotspot atau Wi-Fi klien).
+// Jika gagal, asumsi /24 (subnet hotspot Android dan softAP ESP sama-sama /24).
+// =========================================================
+InetAddress broadcastUntuk(InetAddress fc) {
+  byte[] f = fc.getAddress();
+  if (f.length != 4) return fc;
+  try {
+    for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+      if (!ni.isUp() || ni.isLoopback()) continue;
+      for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
+        InetAddress a = ia.getAddress();
+        InetAddress b = ia.getBroadcast();
+        if (!(a instanceof Inet4Address) || b == null) continue;
+        if (samaSubnet(a.getAddress(), f, ia.getNetworkPrefixLength())) return b;
+      }
+    }
+  }
+  catch (Exception e) {
+    // lanjut ke asumsi /24
+  }
+  try {
+    return InetAddress.getByAddress(new byte[] {f[0], f[1], f[2], (byte) 255});
+  }
+  catch (Exception e) {
+    return fc;
+  }
+}
+
+boolean samaSubnet(byte[] a, byte[] b, int prefix) {
+  if (a.length != 4 || b.length != 4 || prefix < 1 || prefix > 32) return false;
+  int ia = ((a[0] & 0xFF) << 24) | ((a[1] & 0xFF) << 16) | ((a[2] & 0xFF) << 8) | (a[3] & 0xFF);
+  int ib = ((b[0] & 0xFF) << 24) | ((b[1] & 0xFF) << 16) | ((b[2] & 0xFF) << 8) | (b[3] & 0xFF);
+  int mask = 0xFFFFFFFF << (32 - prefix);
+  return (ia & mask) == (ib & mask);
+}
+
+// =========================================================
+// DRAW — hanya UI, tidak mengirim paket
+// =========================================================
+void draw() {
   background(125, 255, 200);
   fill(255);
   stroke(163);
-  rect(0,0,width/4,height/4);
-  rect(3*width/4,0,width/4,height/4);
-  rect(0,height/4,width/4,height/4);
-  rect(3*width/4,height/4,width/4,height/4);
-  rect(0,7*height/8,width,height/8);
-  fill(color(255,100,60));
-  rect(width/4,0,width/2,7*height/8);
-  fill(color(100,150,255));
-  rect(width/4,0,width/2,((7*height)/8)-(gas*7*height)/(8*127));
+  rect(0, 0, width/4, height/4);
+  rect(3*width/4, 0, width/4, height/4);
+  rect(0, height/4, width/4, height/4);
+  rect(3*width/4, height/4, width/4, height/4);
+  rect(0, 7*height/8, width, height/8);
+
+  // Tombol HOLD (kanan-bawah), oranye saat aktif
+  fill(hold ? color(255, 170, 0) : 255);
+  rect(3*width/4, 3*height/4, width/4, height/8);
+
+  fill(color(255, 100, 60));
+  rect(width/4, 0, width/2, 7*height/8);
+  fill(color(100, 150, 255));
+  rect(width/4, 0, width/2, ((7*height)/8) - (gas*7*height)/(8*127));
 
   textSize(height/12);
-  textAlign(CENTER,CENTER);
-  fill(color(50,100,255));
+  textAlign(CENTER, CENTER);
+  fill(color(50, 100, 255));
   text("+", width/8, height/8 - 10);
   text("-", width/8, 3*height/8 - 10);
   text("+", 3*width/4 + width/8, height/8 - 10);
   text("-", 3*width/4 + width/8, 3*height/8 - 10);
+
   fill(0);
   text(gas*100/127, width/2, height/2);
   text(offsetl, width/8, height/4 - 10);
-  text(offsetr, 3*width/4 + width/8, height/4 -10);
+  text(offsetr, 3*width/4 + width/8, height/4 - 10);
 
-  if(exprt_flag == 0){text("BG", width/8, height/2 + height/6);}
-  else if(exprt_flag == 1){text("EX", width/8, height/2 + height/6);}
-  if(lock == 0)text("LOCKED", width/2, 7*height/8 + height/16);
-  else if(lock == 1)text("ACTIVATED", width/2, 7*height/8 + height/16);
+  if (exprt_flag == 0) text("BG", width/8, height/2 + height/6);
+  else                 text("EX", width/8, height/2 + height/6);
+
+  // Mode kirim (tap area kanan-tengah untuk ganti)
+  if (kirimBroadcast) text("BC", 3*width/4 + width/8, height/2 + height/6);
+  else                text("UC", 3*width/4 + width/8, height/2 + height/6);
+
+  if (lock == 0) text("LOCKED", width/2, 7*height/8 + height/16);
+  else           text("ACTIVATED", width/2, 7*height/8 + height/16);
+
+  textSize(height/24);
+  text(hold ? "HOLD ON" : "HOLD", 3*width/4 + width/8, 3*height/4 + height/16);
+
+  // RSSI: dari FC (mode STA), atau diukur HP sendiri saat FC mode AP (FC kirim 0)
+  if (millis() - lastRssiHp > 500) {
+    lastRssiHp = millis();
+    rssiHp = bacaRssiHp();
+  }
+  boolean tlmAda = millis() - lastTelemetryMs <= TLM_HILANG_MS;
+
   textSize(height/14);
   fill(255);
-  text("LQ "+lq+"%", width/2, 3*height/4 - height/12);
-  if (rssi == 0 )text("-"+Character.toString('∞')+"dBm", width/2, 3*height/4);
-  else text("-"+rssi+"dBm", width/2, 3*height/4);
-  text((vcc/10)+"."+(vcc%10)+"V", width/2, 3*height/4 + height/12);
+  if (rssi != 0)                  text("-" + rssi + "dBm", width/2, 3*height/4);
+  else if (tlmAda && rssiHp != 0) text("-" + rssiHp + "dBm HP", width/2, 3*height/4);
+  else                            text("-" + Character.toString('∞') + "dBm", width/2, 3*height/4);
+  text((vcc/10) + "." + (vcc%10) + "V", width/2, 3*height/4 + height/12);
+
   fill(0);
   textSize(height/30);
-  textAlign(CENTER,CENTER);
+  textAlign(CENTER, CENTER);
   text("Instructables", width/2, height/20);
   text("WiFi Plane App", width/2, 2*height/20);
   text("By Ravi Butani", width/2, 3*height/20);
+
+  // Status discovery FC
+  InetAddress fa = fcAddr;
+  if (fa == null) text("FC: mencari...", width/2, 4*height/20);
+  else            text("FC: " + fa.getHostAddress(), width/2, 4*height/20);
+
+  // Link quality: % paket diterima FC dari nomor urut, dan paket dikirim HP per detik
+  text("LQ: " + lqFc + "% (tx " + txPerDetik + "/s)", width/2, 5*height/20);
+
+  // Lock/izin yang gagal
+  String p = peringatan;
+  if (p.length() > 0) {
+    fill(color(200, 0, 0));
+    text("Izin kurang: " + p, width/2, 6*height/20);
+  }
   textSize(height/12);
 
-  int sinceTlm = millis() - lastTlmMillis;
-  if (sinceTlm > LINK_LOST_MS)
-  {
-    vcc = 0;
-    rssi = 0;
-    lq = 0;
-  }
-  if (sinceTlm > IP_UNLOCK_MS && remotIpLock)
-  {
-    remotIpLock=false;
-    println("Connection with " + remotIp + " is lost !");
-    getBroadcastAddress(); //reset bcast address if network changed
-  }
-  if (lock == 1 && (vcc < 35 || lq < LQ_WARN) && millis() - lastVibeMillis > 1000)
-  {
+  // Getar (time-based, tidak blocking UI):
+  //   baterai lemah kapan saja; link putus atau LQ rendah saat ACTIVATED
+  boolean bahaya = (vcc > 0 && vcc < VBAT_WARN) || (lock == 1 && (!tlmAda || lqFc < LQ_WARN));
+  if (bahaya && millis() - lastVib > 1500) {
+    lastVib = millis();
     vibe.vibrate(500);
-    lastVibeMillis = millis();
+  }
+
+  // Reset telemetri kalau sudah >2 detik tidak ada paket balik
+  if (!tlmAda) {
+    rssi = 0;
+    vcc  = 0;
+    lqFc = 0;
   }
 }
 
-// The screen going off pauses the app, which stops the RC packets and failsafes the plane mid flight
-void keepScreenOn()
-{
+// =========================================================
+// CRC8 (identik dengan sisi ESP8266, nilai awal = BIND_ID)
+// =========================================================
+byte calculateCRC8(byte[] data, int length) {
+  int crc = BIND_ID & 0xFF;
+  for (int i = 0; i < length; i++) {
+    crc ^= (data[i] & 0xFF);
+    for (int j = 0; j < 8; j++) {
+      if ((crc & 0x80) != 0) {
+        crc = ((crc << 1) ^ 0x07) & 0xFF;
+      } else {
+        crc = (crc << 1) & 0xFF;
+      }
+    }
+  }
+  return (byte) (crc & 0xFF);
+}
+
+// =========================================================
+// SENSOR CALLBACK
+// =========================================================
+void onAccelerometerEvent(float x, float y, float z) {
+  // Deadzone seperti kode asli
+  if (x > 1.5)       x -= 1.5;
+  else if (x < -1.5) x += 1.5;
+  else               x = 0;
+  accelerometerX = x;
+}
+
+// =========================================================
+// INPUT
+// =========================================================
+void mouseDragged() {
+  if (mouseY < 7*height/8 && mouseX > width/4 && mouseX < 3*width/4 && lock == 1) {
+    gas = 127 - (int)(((float)mouseY / ((float)(7*height/8))) * (float)127);
+  }
+}
+
+void mousePressed() {
+  if (mouseX < width/4 && mouseY < height/4)              offsetl++;
+  else if (mouseX < width/4 && mouseY < height/2)         offsetl--;
+  else if (mouseX > 3*width/4 && mouseY < height/4)       offsetr++;
+  else if (mouseX > 3*width/4 && mouseY < height/2)       offsetr--;
+  else if (mouseX < width/4 && mouseY < 3*height/4) {
+    if (exprt_flag == 0) {
+      exprt_flag = 1;
+      diff_power = DIFF_EX;
+    } else {
+      exprt_flag = 0;
+      diff_power = DIFF_BG;
+    }
+  } else if (mouseX > 3*width/4 && mouseY < 3*height/4) {
+    kirimBroadcast = !kirimBroadcast;   // BC <-> UC
+  } else if (mouseX > 3*width/4 && mouseY < 7*height/8) {
+    // HOLD: aktif = gas ditahan; ditekan lagi = HOLD mati dan gas langsung 0
+    if (hold) {
+      hold = false;
+      gas  = 0;
+    } else if (lock == 1) {
+      hold = true;
+    }
+  } else if (mouseY > 7*height/8) {
+    gas  = 0;
+    hold = false;
+    if (lock == 0) lock = 1;
+    else           lock = 0;
+  }
+}
+
+void mouseReleased() {
+  // Jari lepas = gas 0 (safety saat pesawat jatuh), kecuali HOLD aktif
+  if (!hold) gas = 0;
+}
+
+// =========================================================
+// RECEIVE TELEMETRI dari FC (hypermedia UDP callback)
+// Format: [P_ID, RSSI, VBAT*10, LQ %, CRC8]. Paket valid juga dipakai untuk
+// discovery: IP pengirimnya = IP FC.
+// =========================================================
+void receive(byte[] data, String ip, int port) {
+  if (data.length != 5) return;
+  if (calculateCRC8(data, 4) != data[4]) return;
+
+  rssi = data[1] & 0xFF;
+  vcc  = data[2] & 0xFF;
+  lqFc = data[3] & 0xFF;
+  lastTelemetryMs = millis();
+
+  try {
+    if (ip.startsWith("/")) ip = ip.substring(1);
+    InetAddress a = InetAddress.getByName(ip);   // IP literal: tanpa DNS lookup
+    if (!a.equals(fcAddr)) fcAddr = a;
+  }
+  catch (Exception e) {
+    // abaikan alamat tidak valid
+  }
+}
+
+// =========================================================
+// BROADCAST FALLBACK (hanya dipakai sebelum IP FC ditemukan)
+// DhcpInfo berisi DHCP koneksi Wi-Fi KLIEN HP, bukan subnet hotspot.
+// Return null kalau HP bukan klien Wi-Fi (mis. HP sedang jadi hotspot).
+// =========================================================
+InetAddress getWifiBroadcastAddr() {
+  try {
+    if (wifiMgr == null) return null;
+    android.net.DhcpInfo dhcp = wifiMgr.getDhcpInfo();   // butuh ACCESS_WIFI_STATE
+
+    if (dhcp != null && dhcp.gateway != 0) {
+      int broadcast = (dhcp.gateway & dhcp.netmask) | ~dhcp.netmask;
+      byte[] quads = new byte[4];
+      for (int k = 0; k < 4; k++)
+        quads[k] = (byte) ((broadcast >> (k * 8)) & 0xFF);
+
+      return InetAddress.getByAddress(quads);
+    }
+  }
+  catch (SecurityException se) {
+    tambahPeringatan("ACCESS_WIFI_STATE");
+  }
+  catch (Exception e) {
+    // abaikan; tunggu discovery dari telemetri FC
+  }
+  return null;
+}
+
+// RSSI AP yang diukur HP (HP sebagai klien Wi-Fi), 0 kalau tidak ada
+int bacaRssiHp() {
+  try {
+    if (wifiMgr == null) return 0;
+    int r = wifiMgr.getConnectionInfo().getRssi();   // butuh ACCESS_WIFI_STATE
+    if (r < 0 && r > -127) return -r;
+  }
+  catch (Exception e) {
+  }
+  return 0;
+}
+
+// =========================================================
+// REQUEST & BIND KE WI-FI FC
+// requestNetwork(): selama request aktif, sistem berusaha mempertahankan jaringan
+// Wi-Fi yang cocok (penting untuk AP FC yang tidak punya internet).
+// Wi-Fi tanpa internet (tidak VALIDATED) dianggap AP FC -> socket kirim di-bind ke situ.
+// Hotspot HP sendiri bukan jaringan Wi-Fi klien, jadi mode STA FC tidak terpengaruh.
+// =========================================================
+void setupWifiBinding() {
+  if (android.os.Build.VERSION.SDK_INT < 23) return;   // Network.bindSocket butuh API 23
+  try {
+    connMgr = (ConnectivityManager) getActivity().getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+    NetworkRequest req = new NetworkRequest.Builder()
+      .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+      .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+      .build();
+
+    netCallback = new ConnectivityManager.NetworkCallback() {
+      public void onAvailable(Network n) {
+        // Sebelum Android 8, onCapabilitiesChanged tidak dijamin menyusul onAvailable
+        if (android.os.Build.VERSION.SDK_INT < 26) {
+          NetworkCapabilities c = connMgr.getNetworkCapabilities(n);
+          if (c != null) evaluasiJaringanWifi(n, c);
+        }
+      }
+
+      public void onCapabilitiesChanged(Network n, NetworkCapabilities c) {
+        evaluasiJaringanWifi(n, c);
+      }
+
+      public void onLost(Network n) {
+        if (n.equals(wifiFC)) {
+          wifiFC = null;
+          netGen++;
+        }
+      }
+    };
+
+    try {
+      connMgr.requestNetwork(req, netCallback);          // butuh CHANGE_NETWORK_STATE
+    }
+    catch (SecurityException se) {
+      tambahPeringatan("CHANGE_NETWORK_STATE");
+      connMgr.registerNetworkCallback(req, netCallback); // butuh ACCESS_NETWORK_STATE
+    }
+  }
+  catch (SecurityException se) {
+    tambahPeringatan("ACCESS_NETWORK_STATE");
+  }
+  catch (Exception e) {
+    println("Gagal memasang network callback: " + e.getMessage());
+  }
+}
+
+void evaluasiJaringanWifi(Network n, NetworkCapabilities c) {
+  boolean tanpaInternet = !c.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+  if (tanpaInternet && !n.equals(wifiFC)) {
+    wifiFC = n;
+    netGen++;
+  } else if (!tanpaInternet && n.equals(wifiFC)) {
+    wifiFC = null;
+    netGen++;
+  }
+}
+
+// =========================================================
+// LAYAR & LOCKS
+// Lock dipegang hanya selama app tampil (dilepas di onPause, diambil lagi di onResume).
+// Tiap lock di try sendiri: satu izin kurang tidak membatalkan lock lain.
+// =========================================================
+void keepScreenOn() {
+  // Layar mati = onPause = kendali terkunci di udara
   runOnUiThread(new Runnable() {
     public void run() {
       getActivity().getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -156,154 +667,110 @@ void keepScreenOn()
   });
 }
 
-// Keeps the phone WiFi out of power save so packets are not delayed or missed near the edge of range.
-// Works when the phone is a WiFi client (access point or plane AP), a phone hotspot is not affected.
-void createWifiLock()
-{
-  WifiManager wm = (WifiManager) getActivity().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-  // WIFI_MODE_FULL_LOW_LATENCY (4) on Android 10+, WIFI_MODE_FULL_HIGH_PERF (3) before
-  wifiLock = wm.createWifiLock(Build.VERSION.SDK_INT >= 29 ? 4 : 3, "wifiplane");
-  wifiLock.setReferenceCounted(false);
-  wifiLock.acquire();
+void setupPowerAndWifiLocks() {
+  Context app = getActivity().getApplicationContext();
+  try {
+    wifiMgr = (WifiManager) app.getSystemService(Context.WIFI_SERVICE);
+
+    // 1. Wi-Fi tanpa power save: WIFI_MODE_FULL_LOW_LATENCY (4) di Android 10+,
+    //    WIFI_MODE_FULL_HIGH_PERF (3) sebelumnya. Hanya berpengaruh saat HP klien Wi-Fi.
+    wifiLock = wifiMgr.createWifiLock(android.os.Build.VERSION.SDK_INT >= 29 ? 4 : 3, "RC_WifiLock");
+    wifiLock.setReferenceCounted(false);
+
+    // 2. Buka blokir broadcast/multicast UDP (telemetri broadcast FC mode AP)
+    multicastLock = wifiMgr.createMulticastLock("RC_MulticastLock");
+    multicastLock.setReferenceCounted(false);
+  }
+  catch (Exception e) {
+    println("Gagal membuat WifiLock/MulticastLock: " + e.getMessage());
+  }
+  try {
+    // 3. Cegah CPU tidur
+    PowerManager powerManager = (PowerManager) app.getSystemService(Context.POWER_SERVICE);
+    wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "wifiplane:RC_WakeLock");
+    wakeLock.setReferenceCounted(false);
+  }
+  catch (Exception e) {
+    println("Gagal membuat WakeLock: " + e.getMessage());
+  }
+  ambilLocks();
 }
 
-void pause()
-{
-  if (wifiLock != null) wifiLock.release();
+void ambilLocks() {
+  try {
+    if (wifiLock != null) wifiLock.acquire();
+  }
+  catch (SecurityException e) {
+    tambahPeringatan("WAKE_LOCK");
+  }
+  try {
+    if (multicastLock != null) multicastLock.acquire();
+  }
+  catch (SecurityException e) {
+    tambahPeringatan("CHANGE_WIFI_MULTICAST_STATE");
+  }
+  try {
+    if (wakeLock != null) wakeLock.acquire();
+  }
+  catch (SecurityException e) {
+    tambahPeringatan("WAKE_LOCK");
+  }
 }
 
-void resume()
-{
-  if (wifiLock != null) wifiLock.acquire();
+void lepasLocks() {
+  try {
+    if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
+    if (wifiLock      != null && wifiLock.isHeld())      wifiLock.release();
+    if (wakeLock      != null && wakeLock.isHeld())      wakeLock.release();
+  }
+  catch (Exception e) {
+  }
 }
 
-// Sends RC packets at PACKET_RATE_HZ no matter how fast the screen redraws
-void sendLoop()
-{
-  long period = 1000000000L / PACKET_RATE_HZ;
-  long next = System.nanoTime();
-  while (true)
-  {
-    // stop sending when the app is paused or frozen so the plane failsafes
-    if (millis() - lastDrawMillis < 250)
-      udp.send(buildRcPacket(), remotIp, remotPort);
-    next += period;
-    long wait = next - System.nanoTime();
-    if (wait > 0)
-    {
-      try { Thread.sleep(wait / 1000000L, (int)(wait % 1000000L)); }
-      catch (InterruptedException e) { return; }
+void tambahPeringatan(String izin) {
+  String p = peringatan;
+  if (p.indexOf(izin) < 0) peringatan = (p.length() > 0) ? p + ", " + izin : izin;
+}
+
+// =========================================================
+// LIFECYCLE
+// =========================================================
+void onPause() {
+  // App ter-pause (panggilan masuk, layar mati, pindah app): kunci kendali.
+  // Sender thread mengirim 0/0 selama KIRIM_SETELAH_PAUSE_MS -> motor langsung mati,
+  // tanpa menunggu failsafe FC, lalu berhenti mengirim. Lock dilepas supaya
+  // baterai HP tidak terkuras di background. Setelah kembali, tekan ACTIVATED lagi.
+  gas      = 0;
+  hold     = false;
+  lock     = 0;
+  pauseMs  = System.currentTimeMillis();
+  appAktif = false;
+  lepasLocks();
+  super.onPause();
+}
+
+void onResume() {
+  super.onResume();
+  ambilLocks();   // saat start pertama lock belum dibuat; setup() yang mengambilnya
+  appAktif = true;
+}
+
+void onDestroy() {
+  // Hentikan sender thread
+  senderRunning = false;
+  if (senderThread != null) senderThread.interrupt();
+
+  // Lepas network request / callback
+  if (connMgr != null && netCallback != null) {
+    try {
+      connMgr.unregisterNetworkCallback(netCallback);
     }
-    else next = System.nanoTime(); // fell behind, don't send a burst
+    catch (Exception e) {
+    }
   }
-}
 
-byte[] buildRcPacket()
-{
-  float accX = accelerometerX;
-  if(accX > 1.5){accX = accX - 1.5;}
-  else if(accX < -1.5){accX = accX + 1.5;}
-  else {accX = 0;}
-  boolean armed = (lock == 1);
-  int l_us = armed ? toMicros(gas + offsetl + accX*diff_power) : 1000;
-  int r_us = armed ? toMicros(gas + offsetr - accX*diff_power) : 1000;
-  byte[] pkt = new byte[RC_PKT_LEN];
-  pkt[0] = P_ID;
-  pkt[1] = PKT_RC;
-  pkt[2] = (byte)seq;
-  pkt[3] = armed ? FLAG_ARMED : 0;
-  put16(pkt, 4, l_us);
-  put16(pkt, 6, r_us);
-  put16(pkt, 8, crc16(pkt, RC_PKT_LEN - 2));
-  seq = (seq + 1) & 0xFF;
-  return pkt;
-}
+  // Lepas semua lock
+  lepasLocks();
 
-// motor value 1-127 -> 1000-2000 us channel
-int toMicros(float v)
-{
-  v = constrain(v, 1, 127);
-  return 1000 + (int)((v - 1) * 1000 / 126);
-}
-
-void put16(byte[] b, int i, int v)
-{
-  b[i] = (byte)(v & 0xFF);
-  b[i+1] = (byte)((v >> 8) & 0xFF);
-}
-
-// FNV-1a hash of the binding phrase, same as the plane firmware
-int bindSeed(String phrase)
-{
-  int h = 0x811C9DC5;
-  byte[] b = phrase.getBytes();
-  for (int i = 0; i < b.length; i++)
-  {
-    h ^= (b[i] & 0xFF);
-    h *= 0x01000193;
-  }
-  return (h ^ (h >>> 16)) & 0xFFFF;
-}
-
-// CRC-16/CCITT starting from the binding seed, same as the plane firmware
-int crc16(byte[] data, int len)
-{
-  int crc = crcSeed;
-  for (int i = 0; i < len; i++)
-  {
-    crc ^= (data[i] & 0xFF) << 8;
-    for (int j = 0; j < 8; j++)
-      crc = ((crc & 0x8000) != 0) ? ((crc << 1) ^ 0x1021) : (crc << 1);
-    crc &= 0xFFFF;
-  }
-  return crc;
-}
-
-void onAccelerometerEvent(float x, float y, float z)
-{
-  accelerometerX = x;
-  accelerometerY = y;
-  accelerometerZ = z;
-}
-
-void mouseDragged()
-{
-  if(mouseY<7*height/8 && mouseX>width/4 && mouseX<3*width/4 && lock==1)  gas = 127-(int)(((float)mouseY/((float)(7*height/8)))*(float)127);
-}
-
-void mousePressed()
-{
-  if(mouseX<width/4 && mouseY<height/4) offsetl++;
-  else if(mouseX<width/4 && mouseY<height/2) offsetl--;
-  else if(mouseX>3*width/4 && mouseY<height/4) offsetr++;
-  else if(mouseX>3*width/4 && mouseY<height/2) offsetr--;
-  else if(mouseX<width/4 && mouseY<3*height/4){
-    if(exprt_flag == 0){exprt_flag = 1; diff_power = 3.9;}
-    else{exprt_flag = 0; diff_power = 2.2;}
-  }
-  else if(mouseY>7*height/8){
-    gas=0;
-    if (lock == 0)lock =1;
-    else lock=0;
-  }
-}
-
-void lockRemoteIp(String ip)
-{
-  remotIp=ip;
-  remotIpLock = true;
-  println("Remote ip is locked to: " + ip);
-}
-
-void receive( byte[] data, String ip, int port ) {  // <-- extended handler
-  if (data.length < TLM_PKT_LEN || data[0] != P_ID || data[1] != PKT_TLM)
-    return;
-  if (crc16(data, TLM_PKT_LEN - 2) != ((data[5] & 0xFF) | ((data[6] & 0xFF) << 8)))
-    return; // corrupt or from a plane with another binding phrase
-  rssi = data[2] & 0xFF;
-  lq   = data[3] & 0xFF;
-  vcc  = (data[4] & 0xFF) + 3;
-  lastTlmMillis = millis();
-  if (! remotIpLock)
-    lockRemoteIp(ip);
+  super.onDestroy();
 }

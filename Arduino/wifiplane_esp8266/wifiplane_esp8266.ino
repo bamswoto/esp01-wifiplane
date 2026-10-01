@@ -1,254 +1,517 @@
-//**************************************************
-// WiFi Controlled Tiny Airplane
-// ESP8266 Firmware ino file
-// By Ravi Butani
-// Rajkot INDIA
-// Instructables page: https://www.instructables.com/id/WIFI-CONTROLLED-RC-PLANE/
 //***************************************************
+// WiFi Controlled Tiny Airplane with OTA (STA priority + AP fallback)
+// PROFIL JANGKAUAN MAKSIMUM (latensi boleh lebih tinggi)
+// Optimized with ELRS-style Packet Integrity (CRC8, nilai awal = BIND_ID)
+// Eksternal Voltage Divider: 33k & 8.2k
+// Auto Cut-Off Motor saat Baterai < 3.2V selama 2 detik (latch; re-arm saat perintah HP = 0)
+// Discovery: telemetri di-broadcast selama belum ada HP yang mengontrol,
+//            setelah itu unicast ke IP HP pengirim paket valid
+// Paket kendali (6 byte): [0xEA, SEQ lo, SEQ hi, PWM L, PWM R, CRC8]
+// Telemetri (5 byte): [P_ID, RSSI, VBAT*10, LQ %, CRC8]
+//***************************************************
+
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
+#include <ESP8266mDNS.h>
+#include <ArduinoOTA.h>
 
-// ExpressLRS style link: the app sends RC packets at a fixed rate with a sequence number,
-// stale packets are dropped, link quality (LQ) is counted from sequence gaps, telemetry is
-// sent back every TLM_RATIO packets and the CRC is seeded from the binding phrase.
 #define P_ID 1
-#define BIND_PHRASE "wifiplane" // must match the app, packets from other phones fail the CRC
-#define TLM_RATIO 10  // send link stats every 10 RC packets (1:10), 5 Hz at 50 Hz packet rate
-#define LQ_WINDOW 100 // LQ = % of the last 100 RC packets received
-#define DC_RX   900   // Time in mS for tx inactivity 200 old problem of motor stopping flickring
+#define ST_LED  2
+// Skema & kode asli Ravi Butani: motor KIRI di GPIO5, KANAN di GPIO4.
+// Kalau pesawat berbelok berlawanan dengan kemiringan HP, tukar kedua angka ini.
+#define L_MOTOR 4
+#define R_MOTOR 5
+#define DC_RSSI 1000   // interval telemetri (ms), sejalan dengan jendela LQ 1 detik
+#define DC_RX   900    // failsafe: motor mati jika tidak ada paket valid > 900 ms
 
-#define PKT_RC      0x01 // app -> plane: P_ID, type, seq, flags, ch1 (2), ch2 (2), crc (2)
-#define PKT_TLM     0x02 // plane -> app: P_ID, type, rssi, lq, vcc, crc (2)
-#define RC_PKT_LEN  10
-#define TLM_PKT_LEN 7
-#define FLAG_ARMED  0x01
+// Batas paket yang dikuras per loop() supaya durasi loop tetap terbatas
+#define MAX_PAKET_PER_LOOP 16
 
-//#define SERIAL_DEBUG  //Enable serial debugging
+// --- DEBUG: 1 = cetak mode, IP, kanal, PHY, hasil setting rate ke Serial (115200) ---
+#define DEBUG_SERIAL 0
 
-#define LONG_RANGE          //Max range: 802.11b, max TX power, no modem sleep
-#define TX_POWER_DBM   20.5 //0 - 20.5 dBm, lower it if the ESP resets when motors spin up
-#define PHY_SWITCH_MS 15000 //Alternate 802.11b/g while connecting, for hotspots that refuse 802.11b
+// --- BINDING ---
+// Nilai awal CRC8. HARUS sama dengan BIND_ID di aplikasi Android.
+// Ganti di KEDUA sisi supaya HP/pesawat lain yang memakai aplikasi yang sama
+// tidak saling mengendalikan.
+#define BIND_ID 0x5A
 
-// ESP-12E / ESP-12F / NodeMCU / Wemos D1 mini
-#define ST_LED  2 // onboard LED
-#define L_MOTOR 5 // D1
-#define R_MOTOR 4 // D2
+// --- OTA ---
+// Password upload OTA (Arduino IDE akan memintanya saat upload lewat port jaringan).
+// Tanpa password, siapa pun di jaringan yang sama bisa mengganti firmware.
+#define OTA_PASSWORD "GANTI_PASSWORD_OTA"
 
-#define PWM_RANGE 1000 // one step per microsecond of the 1000-2000 us channel value
-#define MOTOR_OFF 0
+// =========================================================
+// PROFIL JANGKAUAN
+// =========================================================
+// Kalibrasi RF penuh tiap power-up (API Guide: opsi 3, ~200 ms).
+// Default core: hanya kalibrasi VDD33 + daya TX, sisanya pakai data kalibrasi di flash.
+#define RF_KALIBRASI_PENUH 1
 
-ADC_MODE(ADC_VCC);
+// Rate AWAL kirim data dari ESP dikunci 1 Mbps (DSSS).
+// Datasheet ESP8266EX: sensitivitas DSSS 1 Mbps -98 dBm vs CCK 11 Mbps -91 dBm.
+// API Guide: yang dibatasi hanya rate awal; retransmisi tidak dibatasi.
+// Hanya berlaku untuk kiriman FC (telemetri, OTA); rate paket kendali dipilih HP.
+#define KUNCI_RATE_KIRIM_1M 1
 
+// Mode AP: scan saat boot lalu pilih kanal 1/6/11 dengan interferensi terendah (+2-3 detik boot).
+#define AUTO_KANAL_AP    1
+#define KANAL_AP_DEFAULT 1   // dipakai jika AUTO_KANAL_AP 0 atau scan gagal
+
+// EKSPERIMEN (default 0): mode AP mengiklankan hanya rate 1-2 Mbps supaya HP mengirim
+// ke FC dengan modulasi paling tahan derau. API Guide Espressif v1.5.4 menyebut
+// wifi_set_user_sup_rate() baru mendukung 802.11g; dukungan 802.11b di SDK core 3.1.2
+// BELUM terverifikasi. Uji di darat; jika HP gagal konek ke AP, kembalikan ke 0.
+#define EKSP_AP_RATE_1_2M 0
+
+// --- KONFIGURASI BATERAI (LiPo 1S) ---
+#define BATT_MIN_V     3.2    // Motor mati (latch) jika tegangan di bawah ini...
+#define BATT_LOW_MS    2000   // ...terus-menerus selama 2 detik (sag sesaat saat gas penuh diabaikan)
+#define BATT_HYST      0.15   // Re-arm hanya jika tegangan > BATT_MIN_V + BATT_HYST
+                              // DAN perintah terakhir dari HP = 0 (throttle dilepas / LOCK)
+#define BATT_SAMPLE_MS 100    // 1x analogRead tiap 100 ms. Dokumentasi core: analogRead()
+                              // yang terlalu sering mengganggu WiFi dan hasilnya di-cache >= 5 ms
+// Catatan: datasheet ESP8266EX: tegangan operasi 2.5-3.6 V. Dengan LDO/buck dari 1S,
+// rail ESP <= tegangan baterai, jadi di dekat ambang ini ESP bisa reset lebih dulu.
+
+unsigned int l_speed = 0;
+unsigned int r_speed = 0;
+
+unsigned long premillis_rssi = 0;
 unsigned long premillis_rx   = 0;
+unsigned long premillis_batt = 0;
+unsigned long premillis_lq   = 0;
+unsigned long premillis_battLow = 0;
 
-bool    linked   = false; // receiving RC packets, false after DC_RX failsafe
-uint8_t last_seq = 0;
-uint8_t tlm_seq  = 0;     // seq of the RC packet that last triggered telemetry
-uint8_t lq_hist[LQ_WINDOW];
-uint8_t lq_idx   = 0;
-uint8_t lq       = 0;     // received packets in the window, equals LQ %
-uint16_t crc_seed;
+float batteryVoltage = 0.0;     // rata-rata bergerak, 0 = belum ada sampel
+bool  batteryLow     = false;
+bool  battDiBawahMin = false;   // tegangan sedang di bawah BATT_MIN_V (belum tentu 2 detik)
+bool  cmdNol         = true;    // true = perintah terakhir dari HP adalah 0/0
 
-int status = WL_IDLE_STATUS;
-char ssid[] = "wifiplane";   //  your network SSID (name)
-char pass[] = "wifiplane1234";    // your network password (use for WPA, or use as key for WEP)
-int keyIndex = 0;            // your network key Index number (needed only for WEP)
-IPAddress remotIp;
-unsigned int localPort = 6000;      // local port to listen on
-unsigned int remotPort = 2390;      // local port to talk on
-uint8_t packetBuffer[16]; //buffer to hold incoming packet
+// --- Link quality ala ELRS: % paket diterima dari nomor urut yang diharapkan, per detik ---
+bool     linked       = false;  // ada paket valid dalam DC_RX terakhir
+uint16_t lastSeq      = 0;
+uint16_t lqDiterima   = 0;
+uint16_t lqDiharapkan = 0;
+uint8_t  lqPersen     = 0;
+
+// --- Variabel baru untuk non-blocking ---
+unsigned long lastBlink      = 0;
+bool          ledState       = false;
+bool          failsafeActive = false;
+
+// --- Status mode WiFi yang sedang aktif ---
+bool    usingSTA = true;   // true = konek ke hotspot HP, false = jadi AP sendiri
+uint8_t kanalAP  = KANAL_AP_DEFAULT;
+
+// --- Hasil setting rate (untuk DEBUG) ---
+bool hasilRateSta = false, hasilRateAp = false, hasilRateMask = false;
+int  hasilSupRate = -1;
+
+// --- IP HP yang sedang mengontrol (tujuan telemetri unicast) ---
+IPAddress ipHP;
+bool      adaIpHP = false;
+
+// --- KONFIGURASI WIFI (isi sendiri, jangan di-commit ke repo publik) ---
+const char* ssid_sta = "NAMA_HOTSPOT_HP";
+const char* pass_sta = "PASSWORD_HOTSPOT_HP";
+
+const char* ssid_ap  = "wifiplane";
+const char* pass_ap  = "PASSWORD_AP_FC";   // minimal 8 karakter
+
+unsigned int localPort = 6000;
+unsigned int remotPort = 2390;
+
+uint8_t packetBuffer[10];
+uint8_t replyBuffer[5] = {P_ID, 0x00, 0x00, 0x00, 0x00};   // byte ke-5 = CRC8 telemetri
 WiFiUDP Udp;
 
-// FNV-1a hash of the binding phrase, like the ELRS UID it makes the CRC unique per pair
-uint16_t bindSeed(const char *phrase)
-{
-  uint32_t h = 2166136261UL;
-  while (*phrase)
-  {
-    h ^= (uint8_t)*phrase++;
-    h *= 16777619UL;
-  }
-  return (uint16_t)(h ^ (h >> 16));
+#if RF_KALIBRASI_PENUH
+// Hook core (user_rf_pre_init): dijalankan sebelum inisialisasi RF.
+RF_PRE_INIT() {
+  system_phy_set_powerup_option(3);   // 3 = kalibrasi RF penuh tiap power-up
 }
+#endif
 
-// CRC-16/CCITT starting from the binding seed
-uint16_t crc16(const uint8_t *data, uint8_t len)
-{
-  uint16_t crc = crc_seed;
-  while (len--)
-  {
-    crc ^= (uint16_t)(*data++) << 8;
-    for (uint8_t i = 0; i < 8; i++)
-      crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : crc << 1;
+// --- FUNGSI VALIDASI CRC8 (SAMA DENGAN SISI ANDROID) ---
+// Nilai awal = BIND_ID (lihat bagian BINDING)
+uint8_t calculateCRC8(const uint8_t *data, uint8_t len) {
+  uint8_t crc = BIND_ID;
+  for (uint8_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (uint8_t j = 0; j < 8; j++) {
+      if (crc & 0x80) {
+        crc = (crc << 1) ^ 0x07;
+      } else {
+        crc <<= 1;
+      }
+    }
   }
   return crc;
 }
 
-uint16_t get16(const uint8_t *p)
-{
-  return p[0] | (p[1] << 8);
+// --- FUNGSI BACA TEGANGAN BATERAI (1 SAMPEL; dirata-rata antar panggilan) ---
+float readBatteryVoltage() {
+  return (analogRead(A0) / 1024.0) * 4.6894;
 }
 
-void lqReset()
-{
-  memset(lq_hist, 0, sizeof(lq_hist));
-  lq = 0;
+// --- SETTING RADIO ---
+// Dipanggil SETELAH setiap WiFi.mode(). Sejak core 3.x WiFi tidak dinyalakan
+// saat boot, jadi setting yang diberikan saat radio masih mati tidak dijamin
+// berlaku. Cek hasilnya dengan DEBUG_SERIAL 1 (PHY harus 1 = 802.11b).
+void terapkanSettingRadio() {
+  WiFi.setSleep(false);
+  // setOutputPower() = BATAS ATAS daya TX. Level daya tertinggi di PHY init data
+  // core 3.1.2 adalah 19.5 dBm (byte 34 = 78), jadi daya efektif kemungkinan 19.5 dBm.
+  WiFi.setOutputPower(20.5);
+  WiFi.setPhyMode(WIFI_PHY_MODE_11B);
+#if KUNCI_RATE_KIRIM_1M
+  hasilRateSta  = wifi_set_user_rate_limit(RC_LIMIT_11B, 0x00, RATE_11B_B1M, RATE_11B_B1M);  // station
+  hasilRateAp   = wifi_set_user_rate_limit(RC_LIMIT_11B, 0x01, RATE_11B_B1M, RATE_11B_B1M);  // soft-AP
+  hasilRateMask = wifi_set_user_limit_rate_mask(LIMIT_RATE_MASK_ALL);
+#endif
 }
 
-void lqPush(uint8_t received)
-{
-  lq -= lq_hist[lq_idx];
-  lq_hist[lq_idx] = received;
-  lq += received;
-  lq_idx = (lq_idx + 1) % LQ_WINDOW;
+#if AUTO_KANAL_AP
+// --- PILIH KANAL AP TERBAIK ---
+// Scan dengan PHY 11n supaya jaringan OFDM-only ikut terdeteksi (radio 11b tidak
+// bisa men-decode beacon OFDM). Skor = jumlah daya (mW) jaringan lain, dibobot
+// tumpang-tindih kanal (jarak kanal >= 5 dianggap tidak tumpang-tindih).
+uint8_t pilihKanalTerbaik() {
+  const uint8_t kandidat[3] = {1, 6, 11};
+  float skor[3] = {0, 0, 0};
+
+  WiFi.setPhyMode(WIFI_PHY_MODE_11N);
+  int n = WiFi.scanNetworks(false, true);   // sinkron, termasuk SSID tersembunyi
+  if (n <= 0) {
+    WiFi.scanDelete();
+    return KANAL_AP_DEFAULT;
+  }
+
+  for (int i = 0; i < n; i++) {
+    int   ch = WiFi.channel(i);
+    float mw = powf(10.0f, WiFi.RSSI(i) / 10.0f);
+    for (uint8_t k = 0; k < 3; k++) {
+      int d = abs(ch - (int)kandidat[k]);
+      if (d < 5) skor[k] += mw * (1.0f - d / 5.0f);
+    }
+  }
+  WiFi.scanDelete();
+
+  uint8_t best = 0;
+  for (uint8_t k = 1; k < 3; k++) {
+    if (skor[k] < skor[best]) best = k;
+  }
+#if DEBUG_SERIAL
+  Serial.printf("\nScan: %d jaringan | skor ch1=%.3g ch6=%.3g ch11=%.3g mW -> ch%u\n",
+                n, skor[0], skor[1], skor[2], kandidat[best]);
+#endif
+  return kandidat[best];
+}
+#endif
+
+// --- FUNGSI NADA STARTUP SEPERTI ESC ---
+void playESCStartupSound() {
+  uint16_t tones[] = {1200, 1800, 2500};
+  uint8_t duty = 3;
+
+  for (uint8_t i = 0; i < 3; i++) {
+    analogWriteFreq(tones[i]);
+    analogWrite(L_MOTOR, duty);
+    analogWrite(R_MOTOR, duty);
+    delay(100);
+
+    analogWrite(L_MOTOR, 0);
+    analogWrite(R_MOTOR, 0);
+    delay(30);
+  }
+  analogWriteFreq(1000); // Kembalikan frekuensi PWM standar (1000 Hz)
 }
 
-// channel value 1000-2000 us -> motor PWM
-void setMotor(uint8_t pin, uint16_t us)
-{
-  us = constrain(us, 1000, 2000);
-  analogWrite(pin, us - 1000);
+// --- FUNGSI BUNYI BIP MOTOR ---
+void playKoneksiSound(uint8_t count) {
+  for (uint8_t i = 0; i < count; i++) {
+    analogWrite(L_MOTOR, 5);
+    analogWrite(R_MOTOR, 5);
+    delay(50);
+
+    analogWrite(L_MOTOR, 0);
+    analogWrite(R_MOTOR, 0);
+    delay(100);
+  }
 }
 
-void sendTelemetry()
-{
-  uint8_t tlm[TLM_PKT_LEN];
-  long rssi = abs(WiFi.RSSI());
-  float vcc = (((float)ESP.getVcc()/(float)1024.0)+0.75f)*10;
-  tlm[0] = P_ID;
-  tlm[1] = PKT_TLM;
-  tlm[2] = (uint8_t)rssi;
-  tlm[3] = lq;
-  tlm[4] = (uint8_t)vcc;
-  uint16_t crc = crc16(tlm, TLM_PKT_LEN - 2);
-  tlm[5] = crc & 0xFF;
-  tlm[6] = crc >> 8;
-  Udp.beginPacket(remotIp, remotPort);
-  Udp.write(tlm, TLM_PKT_LEN);
-  Udp.endPacket();
-}
-
-// the setup function runs once when you press reset or power the board
 void setup() {
-  crc_seed = bindSeed(BIND_PHRASE);
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-#ifdef LONG_RANGE
-  WiFi.setPhyMode(WIFI_PHY_MODE_11B);  // 802.11b: highest TX power and best RX sensitivity (down to 1 Mbps)
-  WiFi.setOutputPower(TX_POWER_DBM);
-  WiFi.setSleepMode(WIFI_NONE_SLEEP);  // modem sleep delays and drops control packets
-#endif //LONG_RANGE
-  WiFi.setAutoReconnect(true);
-  analogWriteFreq(5000);
-  analogWriteRange(PWM_RANGE);
+#if DEBUG_SERIAL
+  Serial.begin(115200);
+#endif
+
+  analogWriteRange(255);
+
   pinMode(L_MOTOR, OUTPUT);
   pinMode(R_MOTOR, OUTPUT);
-  analogWrite(L_MOTOR,MOTOR_OFF);
-  analogWrite(R_MOTOR,MOTOR_OFF);
+  analogWrite(L_MOTOR, 0);
+  analogWrite(R_MOTOR, 0);
   pinMode(ST_LED, OUTPUT);
-  digitalWrite(ST_LED,HIGH);
-#ifdef SERIAL_DEBUG
-  Serial.begin(115200);
-#endif //SERIAL_DEBUG
-  WiFi.begin(ssid, pass);
-#ifdef LONG_RANGE
-  unsigned long premillis_phy = millis();
-#endif //LONG_RANGE
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    digitalWrite(ST_LED,LOW);
+  digitalWrite(ST_LED, HIGH);
+
+  playESCStartupSound();
+
+  // =========================================================
+  // PRIORITAS 1: COBA KONEK SEBAGAI STA (ke hotspot HP)
+  // =========================================================
+  WiFi.mode(WIFI_STA);
+  terapkanSettingRadio();          // setelah WiFi.mode(), sebelum WiFi.begin()
+  WiFi.begin(ssid_sta, pass_sta);
+
+  unsigned long startWait = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startWait < 8000) {
+    digitalWrite(ST_LED, LOW);
     delay(60);
-    digitalWrite(ST_LED,HIGH);
-    delay(1000);
-#ifdef SERIAL_DEBUG
-    Serial.print(".");
-#endif //SERIAL_DEBUG
-#ifdef LONG_RANGE
-    if(millis()-premillis_phy > PHY_SWITCH_MS)
-    {
-      premillis_phy = millis();
-      WiFi.disconnect();
-      WiFi.setPhyMode(WiFi.getPhyMode() == WIFI_PHY_MODE_11B ? WIFI_PHY_MODE_11G : WIFI_PHY_MODE_11B);
-      WiFi.setOutputPower(TX_POWER_DBM);
-      WiFi.begin(ssid, pass);
-    #ifdef SERIAL_DEBUG
-      Serial.print(WiFi.getPhyMode() == WIFI_PHY_MODE_11B ? "[11b]" : "[11g]");
-    #endif //SERIAL_DEBUG
-    }
-#endif //LONG_RANGE
+    digitalWrite(ST_LED, HIGH);
+    delay(400);
   }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    // --- STA berhasil: HP hotspot ditemukan, radio fokus penuh ke STA ---
+    usingSTA = true;
+    playKoneksiSound(3);   // 3 bip = mode STA aktif
+  } else {
+    // =========================================================
+    // PRIORITAS 2: FALLBACK KE AP (FC jadi hotspot sendiri)
+    // =========================================================
+    WiFi.disconnect();
+    delay(100);
+
+#if AUTO_KANAL_AP
+    kanalAP = pilihKanalTerbaik();   // masih di mode STA
+#else
+    kanalAP = KANAL_AP_DEFAULT;
+#endif
+
+    WiFi.mode(WIFI_AP);
+    terapkanSettingRadio();        // ulangi setelah ganti mode (kembali ke 11b)
+#if EKSP_AP_RATE_1_2M
+    hasilSupRate = wifi_set_user_sup_rate(RATE_11B1M, RATE_11B2M);
+#endif
+    WiFi.softAP(ssid_ap, pass_ap, kanalAP);
+
+    usingSTA = false;
+    playKoneksiSound(2);   // 2 bip = mode AP fallback aktif
+  }
+
   Udp.begin(localPort);
+
+#if DEBUG_SERIAL
+  Serial.printf("\nMode: %s | IP: %s | Kanal: %d | PHY: %d (1=11b, 2=11g, 3=11n)\n",
+                usingSTA ? "STA" : "AP",
+                (usingSTA ? WiFi.localIP() : WiFi.softAPIP()).toString().c_str(),
+                (int)WiFi.channel(), (int)WiFi.getPhyMode());
+  Serial.printf("Rate limit 1M: sta=%d ap=%d mask=%d (baca: 0x%02X) | sup_rate=%d (-1 = tidak dipakai)\n",
+                hasilRateSta, hasilRateAp, hasilRateMask,
+                wifi_get_user_limit_rate_mask(), hasilSupRate);
+#endif
+
+  // --- KONFIGURASI ARDUINO OTA (JANGAN DIUBAH) ---
+  ArduinoOTA.setHostname("wifiplane-ota");
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+
+  ArduinoOTA.onStart([]() {
+    // Matikan motor demi keselamatan saat proses upload firmware via OTA
+    analogWrite(L_MOTOR, 0);
+    analogWrite(R_MOTOR, 0);
+    digitalWrite(ST_LED, LOW);
+  });
+
+  ArduinoOTA.onEnd([]() {
+    analogWrite(L_MOTOR, 0);
+    analogWrite(R_MOTOR, 0);
+    digitalWrite(ST_LED, HIGH);
+  });
+
+  ArduinoOTA.begin();
+
+  premillis_lq = millis();
 }
 
-// the loop function runs over and over again forever
 void loop() {
-  delay(5);
-  if(WiFi.status() == WL_CONNECTED)
-  {
-    digitalWrite(ST_LED,LOW);
-    // read all queued packets so the newest command is applied without lag
-    while (Udp.parsePacket())
-    {
-      // read the packet into packetBufffer
-      int len = Udp.read(packetBuffer, sizeof(packetBuffer));
-      if (len != RC_PKT_LEN || packetBuffer[0] != P_ID || packetBuffer[1] != PKT_RC)
-        continue;
-      if (crc16(packetBuffer, RC_PKT_LEN - 2) != get16(packetBuffer + RC_PKT_LEN - 2))
-        continue; // corrupt or from a phone with another binding phrase
-      uint8_t seq = packetBuffer[2];
-      if (linked && (int8_t)(seq - last_seq) <= 0)
-        continue; // older than what we already applied
-      if (linked)
-      {
-        for (uint8_t gap = seq - last_seq; gap > 1; gap--)
-          lqPush(0); // count the packets lost in between
-      }
-      else
-      {
-        lqReset(); // LQ climbs from 0 after (re)connecting, like ELRS
-      }
-      lqPush(1);
+  // =========================================================
+  // 0. OTA HANDLER  (JANGAN DIUBAH — selalu di paling atas)
+  // =========================================================
+  ArduinoOTA.handle();
+  // =========================================================
+  // 1. TERIMA PAKET UDP DENGAN VALIDASI CRC8 ALA ELRS
+  //    Antrean dikuras tiap loop; hanya paket valid TERBARU yang dipakai.
+  //    Nomor urut 16-bit: paket basi/duplikat dibuang, celah nomor = paket hilang (LQ).
+  //    16-bit supaya putus > 0.5 detik di 250 Hz tidak terbaca sebagai paket basi.
+  // =========================================================
+  bool    adaPaketBaru = false;
+  uint8_t cmdL = 0;
+  uint8_t cmdR = 0;
 
-      bool armed = packetBuffer[3] & FLAG_ARMED;
-      uint16_t l_us = armed ? get16(packetBuffer + 4) : 1000;
-      uint16_t r_us = armed ? get16(packetBuffer + 6) : 1000;
-      setMotor(L_MOTOR, l_us);
-      setMotor(R_MOTOR, r_us);
-    #ifdef SERIAL_DEBUG
-      Serial.print(l_us);
-      Serial.print(" \t");
-      Serial.print(r_us);
-      Serial.print(" \tLQ ");
-      Serial.println(lq);
-    #endif //SERIAL_DEBUG
+  for (uint8_t n = 0; n < MAX_PAKET_PER_LOOP; n++) {
+    int packetSize = Udp.parsePacket();   // juga melepas paket sebelumnya
+    if (packetSize <= 0) break;           // antrean kosong
+    if (packetSize != 6) continue;        // ukuran salah -> abaikan
 
-      remotIp = Udp.remoteIP(); // unicast telemetry is acked and retried, broadcast is not
-      if (!linked || (uint8_t)(seq - tlm_seq) >= TLM_RATIO)
-      {
-        tlm_seq = seq;
-        sendTelemetry(); // reply right away on connect so the app locks onto our IP
-      }
-      last_seq = seq;
-      linked = true;
-      premillis_rx = millis();
-    }
-     if(millis()-premillis_rx > DC_RX)
-     {
-       linked = false;
-       analogWrite(L_MOTOR,MOTOR_OFF);
-       analogWrite(R_MOTOR,MOTOR_OFF);
-       //Serial.println("nodata");
-     }
+    Udp.read(packetBuffer, 6);
+    if (packetBuffer[0] != 0xEA) continue;
+    if (packetBuffer[5] != calculateCRC8(packetBuffer, 5)) continue;
+
+    uint16_t seq     = packetBuffer[1] | (packetBuffer[2] << 8);
+    int16_t  selisih = (int16_t)(seq - lastSeq);
+    if (linked && selisih <= 0) continue; // lebih lama dari yang sudah dipakai
+
+    lqDiharapkan += linked ? selisih : 1; // setelah failsafe: mulai hitung dari paket ini
+    lqDiterima++;
+    lastSeq = seq;
+    linked  = true;
+
+    cmdL = packetBuffer[3];
+    cmdR = packetBuffer[4];
+    ipHP = Udp.remoteIP();                // dibaca selagi paket ini masih aktif
+    adaPaketBaru = true;
   }
-  else
-  {
-    linked = false;
-    digitalWrite(ST_LED,LOW);
-    delay(60);
-    digitalWrite(ST_LED,HIGH);
-    delay(1000);
-    analogWrite(L_MOTOR,MOTOR_OFF);
-    analogWrite(R_MOTOR,MOTOR_OFF);
-    digitalWrite(ST_LED,HIGH);
+
+  if (adaPaketBaru) {
+    digitalWrite(ST_LED, LOW);
+
+    cmdNol = (cmdL == 0 && cmdR == 0);
+
+    if (batteryLow) {
+      l_speed = 0;
+      r_speed = 0;
+    } else {
+      l_speed = cmdL;
+      r_speed = cmdR;
+    }
+    analogWrite(L_MOTOR, l_speed);
+    analogWrite(R_MOTOR, r_speed);
+
+    adaIpHP        = true;
+    premillis_rx   = millis();
+    failsafeActive = false;
+    digitalWrite(ST_LED, HIGH);
+  }
+
+  // Jendela link quality 1 detik
+  if (millis() - premillis_lq >= 1000) {
+    premillis_lq = millis();
+    lqPersen     = lqDiharapkan ? (uint8_t)min(100UL, 100UL * lqDiterima / lqDiharapkan) : 0;
+    lqDiterima   = 0;
+    lqDiharapkan = 0;
+  }
+
+  // =========================================================
+  // 2. SAFETY: CEK BATERAI (1 sampel tiap 100 ms, rata-rata bergerak)
+  //    Cutoff di-latch setelah tegangan < BATT_MIN_V terus-menerus BATT_LOW_MS.
+  //    Motor baru boleh hidup lagi jika tegangan sudah pulih
+  //    (> BATT_MIN_V + BATT_HYST) DAN perintah terakhir dari HP = 0.
+  //    Tanpa latch, sag saat motor jalan > BATT_HYST membuat motor on/off berulang.
+  // =========================================================
+  if (millis() - premillis_batt >= BATT_SAMPLE_MS) {
+    premillis_batt = millis();
+    float v = readBatteryVoltage();
+    batteryVoltage = (batteryVoltage <= 0) ? v : batteryVoltage + 0.25f * (v - batteryVoltage);
+
+    if (batteryVoltage < BATT_MIN_V) {
+      if (!battDiBawahMin) {
+        battDiBawahMin    = true;
+        premillis_battLow = millis();
+      }
+      if (millis() - premillis_battLow >= BATT_LOW_MS) batteryLow = true;
+    } else {
+      battDiBawahMin = false;
+      if (batteryLow && cmdNol && batteryVoltage > (BATT_MIN_V + BATT_HYST)) {
+        batteryLow = false;
+      }
+    }
+
+    if (batteryLow) {
+      analogWrite(L_MOTOR, 0);
+      analogWrite(R_MOTOR, 0);
+      l_speed = 0;
+      r_speed = 0;
+    }
+  }
+
+  // =========================================================
+  // 3. KIRIM TELEMETRI KE ANDROID: [P_ID, RSSI, VBAT*10, LQ %, CRC8]
+  //    - Ada HP aktif (paket valid < DC_RX ms) : unicast ke IP HP tersebut
+  //    - Belum/tidak ada                       : broadcast (discovery), supaya
+  //      aplikasi bisa menemukan IP FC di subnet hotspot apa pun
+  // =========================================================
+  if (millis() - premillis_rssi > DC_RSSI) {
+    premillis_rssi = millis();
+
+    // RSSI hanya valid di mode STA (di mode AP aplikasi memakai RSSI yang diukur HP)
+    long rssi = 0;
+    if (usingSTA) {
+      rssi = abs(WiFi.RSSI());
+    }
+
+    replyBuffer[1] = (uint8_t)rssi;
+    replyBuffer[2] = (uint8_t)(batteryVoltage * 10);
+    replyBuffer[3] = lqPersen;
+    replyBuffer[4] = calculateCRC8(replyBuffer, 4);
+
+    IPAddress replyIp;
+    if (adaIpHP && (millis() - premillis_rx <= DC_RX)) {
+      replyIp = ipHP;
+    } else if (usingSTA) {
+      replyIp = IPAddress(255, 255, 255, 255);
+    } else {
+      IPAddress apIp = WiFi.softAPIP();                     // default 192.168.4.1/24
+      replyIp = IPAddress(apIp[0], apIp[1], apIp[2], 255);
+    }
+
+    Udp.beginPacket(replyIp, remotPort);
+    Udp.write(replyBuffer, 5);
+    Udp.endPacket();
+  }
+
+  // =========================================================
+  // 4. FAIL-SAFE MOTOR
+  // =========================================================
+  if (millis() - premillis_rx > DC_RX && !failsafeActive) {
+    failsafeActive = true;
+    linked         = false;   // paket berikutnya diterima berapa pun nomor urutnya
+    analogWrite(L_MOTOR, 0);
+    analogWrite(R_MOTOR, 0);
+  }
+
+  // =========================================================
+  // 5. INDIKATOR LED (non-blocking, tanpa delay)
+  //    - Battery low          : kedip cepat 100 ms
+  //    - Tidak ada koneksi    : kedip lambat 800 ms
+  //      * Mode STA : WiFi.status() != WL_CONNECTED
+  //      * Mode AP  : softAPgetStationNum() == 0
+  // =========================================================
+  unsigned long now = millis();
+  uint16_t interval;
+
+  bool linkLost;
+  if (usingSTA) {
+    linkLost = (WiFi.status() != WL_CONNECTED);
+  } else {
+    linkLost = (WiFi.softAPgetStationNum() == 0);
+  }
+
+  if (batteryLow) {
+    interval = 100;
+  } else if (linkLost) {
+    interval = 800;
+  } else {
+    interval = 0;
+    if (ledState) {
+      ledState = false;
+      digitalWrite(ST_LED, HIGH);
+    }
+  }
+
+  if (interval && (now - lastBlink >= interval)) {
+    lastBlink = now;
+    ledState  = !ledState;
+    digitalWrite(ST_LED, ledState ? HIGH : LOW);
   }
 }
