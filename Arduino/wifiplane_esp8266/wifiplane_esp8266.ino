@@ -40,6 +40,10 @@
 // Password upload OTA (Arduino IDE akan memintanya saat upload lewat port jaringan).
 // Tanpa password, siapa pun di jaringan yang sama bisa mengganti firmware.
 #define OTA_PASSWORD "GANTI_PASSWORD_OTA"
+// OTA (dan mDNS) hanya aktif jika remote Android tidak terbuka: tidak ada paket kendali
+// valid selama OTA_TUNDA_MS. Begitu paket remote datang, OTA langsung dimatikan.
+// Berlaku di mode STA maupun AP.
+#define OTA_TUNDA_MS 10000
 
 // =========================================================
 // PROFIL JANGKAUAN
@@ -107,6 +111,8 @@ uint8_t kanalAP  = KANAL_AP_DEFAULT;
 // --- Hasil setting rate (untuk DEBUG) ---
 bool hasilRateSta = false, hasilRateAp = false, hasilRateMask = false;
 int  hasilSupRate = -1;
+
+bool otaAktif = false;   // ArduinoOTA.begin() sudah dipanggil (end() crash jika belum)
 
 // --- IP HP yang sedang mengontrol (tujuan telemetri unicast) ---
 IPAddress ipHP;
@@ -241,6 +247,21 @@ void playKoneksiSound(uint8_t count) {
   }
 }
 
+// --- OTA HANYA SAAT REMOTE ANDROID TIDAK TERBUKA ---
+// Remote dianggap terbuka selama paket kendali valid masih datang (aplikasi mengirim
+// 250 Hz dan berhenti 1 detik setelah ditutup/di-pause). Saat boot dihitung dari 0,
+// jadi tanpa remote OTA aktif ~OTA_TUNDA_MS setelah pesawat dinyalakan.
+void aturOTA() {
+  bool remoteTerbuka = (millis() - premillis_rx < OTA_TUNDA_MS);
+  if (remoteTerbuka && otaAktif) {
+    ArduinoOTA.end();     // tutup listener OTA dan mDNS
+    otaAktif = false;
+  } else if (!remoteTerbuka && !otaAktif) {
+    ArduinoOTA.begin();
+    otaAktif = true;
+  }
+}
+
 void setup() {
 #if DEBUG_SERIAL
   Serial.begin(115200);
@@ -258,7 +279,7 @@ void setup() {
   playESCStartupSound();
 
   // =========================================================
-  // PRIORITAS 1: COBA KONEK SEBAGAI STA (WiFi modem rumah untuk OTA, atau hotspot HP)
+  // PRIORITAS 1: COBA KONEK SEBAGAI STA (WiFi modem rumah, atau hotspot HP)
   // =========================================================
   WiFi.mode(WIFI_STA);
   terapkanSettingRadio();          // setelah WiFi.mode(), sebelum WiFi.begin()
@@ -313,36 +334,34 @@ void setup() {
 #endif
 
   // --- KONFIGURASI ARDUINO OTA (JANGAN DIUBAH) ---
-  // OTA hanya di mode STA (flash lewat WiFi modem rumah). Di mode AP (terbang)
-  // OTA dan mDNS tidak dijalankan supaya tidak mengganggu penerbangan.
-  if (usingSTA) {
-    ArduinoOTA.setHostname("wifiplane-ota");
-    ArduinoOTA.setPassword(OTA_PASSWORD);
+  // ArduinoOTA.begin()/end() dipanggil oleh aturOTA() di loop(): OTA hanya aktif
+  // selama remote Android tidak terbuka, supaya tidak mengganggu penerbangan.
+  ArduinoOTA.setHostname("wifiplane-ota");
+  ArduinoOTA.setPassword(OTA_PASSWORD);
 
-    ArduinoOTA.onStart([]() {
-      // Matikan motor demi keselamatan saat proses upload firmware via OTA
-      analogWrite(MOTOR_KANAN, 0);
-      analogWrite(MOTOR_KIRI, 0);
-      digitalWrite(ST_LED, LOW);
-    });
+  ArduinoOTA.onStart([]() {
+    // Matikan motor demi keselamatan saat proses upload firmware via OTA
+    analogWrite(MOTOR_KANAN, 0);
+    analogWrite(MOTOR_KIRI, 0);
+    digitalWrite(ST_LED, LOW);
+  });
 
-    ArduinoOTA.onEnd([]() {
-      analogWrite(MOTOR_KANAN, 0);
-      analogWrite(MOTOR_KIRI, 0);
-      digitalWrite(ST_LED, HIGH);
-    });
-
-    ArduinoOTA.begin();
-  }
+  ArduinoOTA.onEnd([]() {
+    analogWrite(MOTOR_KANAN, 0);
+    analogWrite(MOTOR_KIRI, 0);
+    digitalWrite(ST_LED, HIGH);
+  });
 
   premillis_lq = millis();
 }
 
 void loop() {
   // =========================================================
-  // 0. OTA HANDLER  (JANGAN DIUBAH — selalu di paling atas; hanya mode STA)
+  // 0. OTA HANDLER  (JANGAN DIUBAH — selalu di paling atas)
+  //    Hanya saat remote Android tidak terbuka (lihat aturOTA)
   // =========================================================
-  if (usingSTA) ArduinoOTA.handle();
+  aturOTA();
+  if (otaAktif) ArduinoOTA.handle();
   // =========================================================
   // 1. TERIMA PAKET UDP DENGAN VALIDASI CRC8 ALA ELRS
   //    Antrean dikuras tiap loop; hanya paket valid TERBARU yang dipakai.

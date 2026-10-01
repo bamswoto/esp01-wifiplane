@@ -20,9 +20,11 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 **WiFi modes**
 
-* At power up the plane tries `ssid_sta` for 8 s (3 beeps when connected). Near the home WiFi this is the mode for OTA updates (Arduino IDE port `wifiplane-ota`, asks for `OTA_PASSWORD`).
+* At power up the plane tries `ssid_sta` (home WiFi or phone hotspot) for 8 s (3 beeps when connected).
 
-* Otherwise it becomes an access point `wifiplane` on the least busy of channels 1, 6 and 11 (2 beeps), the mode for flying. Connect the phone to it. OTA and mDNS are off in this mode so they don't disturb the flight.
+* Otherwise it becomes an access point `wifiplane` on the least busy of channels 1, 6 and 11 (2 beeps). Connect the phone to it.
+
+* OTA updates (Arduino IDE port `wifiplane-ota`, asks for `OTA_PASSWORD`) work in both modes, but only while the remote app isn't open: OTA and mDNS start after 10 s without control packets (`OTA_TUNDA_MS`) and stop as soon as the app sends again, so they never run during a flight. After power up without the app, wait about 10 s before uploading.
 
 * The mode is picked once at power up and kept until the plane is switched off.
 
