@@ -3,7 +3,7 @@
 // PROFIL JANGKAUAN MAKSIMUM (latensi boleh lebih tinggi)
 // Background sender thread (~250 Hz) + buffer reuse
 // ELRS-style Packet Integrity (CRC8, nilai awal = BIND_ID) + nomor urut 16-bit
-// Paket kendali (6 byte): [0xEA, SEQ lo, SEQ hi, PWM L, PWM R, CRC8]
+// Paket kendali (6 byte): [0xEA, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI, CRC8]
 // Discovery: IP FC diambil dari telemetri valid
 // Mode kirim (toggle area kanan-tengah):
 //   BC = broadcast ke subnet FC  (mode STA/hotspot: frame grup, tanpa retry MAC. Tidak ditahan
@@ -62,8 +62,8 @@ final int KIRIM_SETELAH_PAUSE_MS = 1000;
 volatile int gas          = 0;
 volatile int lock         = 0;
 volatile boolean hold     = false;   // true = gas ditahan walau jari lepas (untuk atur trim)
-volatile int offsetl      = 0;
-volatile int offsetr      = 0;
+volatile int trimKiri     = 0;   // tombol kolom kiri: tambah motor kanan -> belok kiri
+volatile int trimKanan    = 0;   // tombol kolom kanan: tambah motor kiri -> belok kanan
 volatile float accelerometerX = 0;
 volatile float diff_power = DIFF_BG;
 
@@ -221,7 +221,7 @@ void senderLoop() {
 
       if (target != null && kirim) {
         // --- Snapshot state (volatile read) lalu susun paket 6 byte ---
-        isiPaket(buf, seq, gas, offsetl, offsetr, accelerometerX, diff_power, lock);
+        isiPaket(buf, seq, gas, trimKiri, trimKanan, accelerometerX, diff_power, lock);
 
         // --- Kirim (buffer yang sama, packet yang sama) ---
         pkt.setAddress(target);
@@ -266,23 +266,24 @@ void senderLoop() {
 }
 
 // =========================================================
-// PAKET KENDALI (6 byte): [0xEA, SEQ lo, SEQ hi, PWM L, PWM R, CRC8]
+// PAKET KENDALI (6 byte): [0xEA, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI, CRC8]
 // LOCK atau gas 0 = kedua motor 0 (kemiringan HP dan trim tidak memutar motor)
 // =========================================================
-void isiPaket(byte[] buf, int seq, int g, int ol, int orr, float ax, float dp, int lk) {
+void isiPaket(byte[] buf, int seq, int g, int tKiri, int tKanan, float ax, float dp, int lk) {
   // --- Mixing seperti kode asli ---
-  int l_speed = (int)((float)g + (float)ol + ax * dp);
-  int r_speed = (int)((float)g + (float)orr - ax * dp);
+  // HP miring kiri (ax > 0) -> motor kanan lebih kencang -> pesawat belok kiri
+  int kanan = (int)((float)g + (float)tKiri + ax * dp);
+  int kiri  = (int)((float)g + (float)tKanan - ax * dp);
 
-  int pwm_l = constrain(l_speed * 2, 0, 255);
-  int pwm_r = constrain(r_speed * 2, 0, 255);
+  int pwmKanan = constrain(kanan * 2, 0, 255);
+  int pwmKiri  = constrain(kiri * 2, 0, 255);
 
   buf[0] = (byte) 0xEA;   // Header
   buf[1] = (byte) (seq & 0xFF);
   buf[2] = (byte) ((seq >> 8) & 0xFF);
   if (lk == 1 && g > 0) {
-    buf[3] = (byte) pwm_l;
-    buf[4] = (byte) pwm_r;
+    buf[3] = (byte) pwmKanan;
+    buf[4] = (byte) pwmKiri;
   } else {
     buf[3] = (byte) 0x00;
     buf[4] = (byte) 0x00;
@@ -382,8 +383,8 @@ void draw() {
 
   fill(0);
   text(gas*100/127, width/2, height/2);
-  text(offsetl, width/8, height/4 - 10);
-  text(offsetr, 3*width/4 + width/8, height/4 - 10);
+  text(trimKiri, width/8, height/4 - 10);
+  text(trimKanan, 3*width/4 + width/8, height/4 - 10);
 
   if (exprt_flag == 0) text("BG", width/8, height/2 + height/6);
   else                 text("EX", width/8, height/2 + height/6);
@@ -490,10 +491,10 @@ void mouseDragged() {
 }
 
 void mousePressed() {
-  if (mouseX < width/4 && mouseY < height/4)              offsetl++;
-  else if (mouseX < width/4 && mouseY < height/2)         offsetl--;
-  else if (mouseX > 3*width/4 && mouseY < height/4)       offsetr++;
-  else if (mouseX > 3*width/4 && mouseY < height/2)       offsetr--;
+  if (mouseX < width/4 && mouseY < height/4)              trimKiri++;
+  else if (mouseX < width/4 && mouseY < height/2)         trimKiri--;
+  else if (mouseX > 3*width/4 && mouseY < height/4)       trimKanan++;
+  else if (mouseX > 3*width/4 && mouseY < height/2)       trimKanan--;
   else if (mouseX < width/4 && mouseY < 3*height/4) {
     if (exprt_flag == 0) {
       exprt_flag = 1;

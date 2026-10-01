@@ -6,7 +6,7 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 * ESP-12E (or ESP-12F, NodeMCU, Wemos D1 mini) wired as in the [original schematic](Hardware/original-electronics.png), status LED on gpio2.
 
-* Motors: the sketch drives the left motor on gpio4 and the right one on gpio5. The original schematic has them the other way round, so if the plane turns against the phone tilt, swap `L_MOTOR` and `R_MOTOR`.
+* Motors as in the original schematic: right motor on gpio4 (T2, `MOTOR_KANAN`), left motor on gpio5 (T1, `MOTOR_KIRI`). Tilting the phone left speeds up the right motor, so the plane turns left. The left trim buttons add to the right motor (trim left), the right ones to the left motor.
 
 * Battery voltage on A0 through a 33k / 8.2k divider.
 
@@ -34,7 +34,7 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 **Link**
 
-* The app sends 6 byte control packets at 250 Hz: `[0xEA, seq lo, seq hi, PWM L, PWM R, CRC8]`, CRC8 seeded with `BIND_ID`.
+* The app sends 6 byte control packets at 250 Hz: `[0xEA, seq lo, seq hi, PWM right, PWM left, CRC8]`, CRC8 seeded with `BIND_ID`.
 
 * BC mode broadcasts them (no WiFi retries, no queue while the plane is the only device on the hotspot), UC mode unicasts them (acked and retried).
 

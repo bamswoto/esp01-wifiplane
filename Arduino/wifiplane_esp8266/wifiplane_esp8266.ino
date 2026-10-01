@@ -6,7 +6,7 @@
 // Auto Cut-Off Motor saat Baterai < 3.2V selama 2 detik (latch; re-arm saat perintah HP = 0)
 // Discovery: telemetri di-broadcast selama belum ada HP yang mengontrol,
 //            setelah itu unicast ke IP HP pengirim paket valid
-// Paket kendali (6 byte): [0xEA, SEQ lo, SEQ hi, PWM L, PWM R, CRC8]
+// Paket kendali (6 byte): [0xEA, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI, CRC8]
 // Telemetri (5 byte): [P_ID, RSSI, VBAT*10, LQ %, CRC8]
 //***************************************************
 
@@ -17,10 +17,10 @@
 
 #define P_ID 1
 #define ST_LED  2
-// Skema & kode asli Ravi Butani: motor KIRI di GPIO5, KANAN di GPIO4.
-// Kalau pesawat berbelok berlawanan dengan kemiringan HP, tukar kedua angka ini.
-#define L_MOTOR 4
-#define R_MOTOR 5
+// Sesuai skema asli Ravi Butani: GPIO4 -> T2 -> MOTOR_R, GPIO5 -> T1 -> MOTOR_L.
+// HP miring kiri -> motor kanan lebih kencang -> pesawat belok kiri.
+#define MOTOR_KANAN 4
+#define MOTOR_KIRI  5
 #define DC_RSSI 1000   // interval telemetri (ms), sejalan dengan jendela LQ 1 detik
 #define DC_RX   900    // failsafe: motor mati jika tidak ada paket valid > 900 ms
 
@@ -74,8 +74,8 @@
 // Catatan: datasheet ESP8266EX: tegangan operasi 2.5-3.6 V. Dengan LDO/buck dari 1S,
 // rail ESP <= tegangan baterai, jadi di dekat ambang ini ESP bisa reset lebih dulu.
 
-unsigned int l_speed = 0;
-unsigned int r_speed = 0;
+unsigned int pwmKanan = 0;
+unsigned int pwmKiri  = 0;
 
 unsigned long premillis_rssi = 0;
 unsigned long premillis_rx   = 0;
@@ -217,12 +217,12 @@ void playESCStartupSound() {
 
   for (uint8_t i = 0; i < 3; i++) {
     analogWriteFreq(tones[i]);
-    analogWrite(L_MOTOR, duty);
-    analogWrite(R_MOTOR, duty);
+    analogWrite(MOTOR_KANAN, duty);
+    analogWrite(MOTOR_KIRI, duty);
     delay(100);
 
-    analogWrite(L_MOTOR, 0);
-    analogWrite(R_MOTOR, 0);
+    analogWrite(MOTOR_KANAN, 0);
+    analogWrite(MOTOR_KIRI, 0);
     delay(30);
   }
   analogWriteFreq(1000); // Kembalikan frekuensi PWM standar (1000 Hz)
@@ -231,12 +231,12 @@ void playESCStartupSound() {
 // --- FUNGSI BUNYI BIP MOTOR ---
 void playKoneksiSound(uint8_t count) {
   for (uint8_t i = 0; i < count; i++) {
-    analogWrite(L_MOTOR, 5);
-    analogWrite(R_MOTOR, 5);
+    analogWrite(MOTOR_KANAN, 5);
+    analogWrite(MOTOR_KIRI, 5);
     delay(50);
 
-    analogWrite(L_MOTOR, 0);
-    analogWrite(R_MOTOR, 0);
+    analogWrite(MOTOR_KANAN, 0);
+    analogWrite(MOTOR_KIRI, 0);
     delay(100);
   }
 }
@@ -248,10 +248,10 @@ void setup() {
 
   analogWriteRange(255);
 
-  pinMode(L_MOTOR, OUTPUT);
-  pinMode(R_MOTOR, OUTPUT);
-  analogWrite(L_MOTOR, 0);
-  analogWrite(R_MOTOR, 0);
+  pinMode(MOTOR_KANAN, OUTPUT);
+  pinMode(MOTOR_KIRI, OUTPUT);
+  analogWrite(MOTOR_KANAN, 0);
+  analogWrite(MOTOR_KIRI, 0);
   pinMode(ST_LED, OUTPUT);
   digitalWrite(ST_LED, HIGH);
 
@@ -318,14 +318,14 @@ void setup() {
 
   ArduinoOTA.onStart([]() {
     // Matikan motor demi keselamatan saat proses upload firmware via OTA
-    analogWrite(L_MOTOR, 0);
-    analogWrite(R_MOTOR, 0);
+    analogWrite(MOTOR_KANAN, 0);
+    analogWrite(MOTOR_KIRI, 0);
     digitalWrite(ST_LED, LOW);
   });
 
   ArduinoOTA.onEnd([]() {
-    analogWrite(L_MOTOR, 0);
-    analogWrite(R_MOTOR, 0);
+    analogWrite(MOTOR_KANAN, 0);
+    analogWrite(MOTOR_KIRI, 0);
     digitalWrite(ST_LED, HIGH);
   });
 
@@ -346,8 +346,8 @@ void loop() {
   //    16-bit supaya putus > 0.5 detik di 250 Hz tidak terbaca sebagai paket basi.
   // =========================================================
   bool    adaPaketBaru = false;
-  uint8_t cmdL = 0;
-  uint8_t cmdR = 0;
+  uint8_t cmdKanan = 0;
+  uint8_t cmdKiri  = 0;
 
   for (uint8_t n = 0; n < MAX_PAKET_PER_LOOP; n++) {
     int packetSize = Udp.parsePacket();   // juga melepas paket sebelumnya
@@ -367,8 +367,8 @@ void loop() {
     lastSeq = seq;
     linked  = true;
 
-    cmdL = packetBuffer[3];
-    cmdR = packetBuffer[4];
+    cmdKanan = packetBuffer[3];
+    cmdKiri  = packetBuffer[4];
     ipHP = Udp.remoteIP();                // dibaca selagi paket ini masih aktif
     adaPaketBaru = true;
   }
@@ -376,17 +376,17 @@ void loop() {
   if (adaPaketBaru) {
     digitalWrite(ST_LED, LOW);
 
-    cmdNol = (cmdL == 0 && cmdR == 0);
+    cmdNol = (cmdKanan == 0 && cmdKiri == 0);
 
     if (batteryLow) {
-      l_speed = 0;
-      r_speed = 0;
+      pwmKanan = 0;
+      pwmKiri  = 0;
     } else {
-      l_speed = cmdL;
-      r_speed = cmdR;
+      pwmKanan = cmdKanan;
+      pwmKiri  = cmdKiri;
     }
-    analogWrite(L_MOTOR, l_speed);
-    analogWrite(R_MOTOR, r_speed);
+    analogWrite(MOTOR_KANAN, pwmKanan);
+    analogWrite(MOTOR_KIRI, pwmKiri);
 
     adaIpHP        = true;
     premillis_rx   = millis();
@@ -428,10 +428,10 @@ void loop() {
     }
 
     if (batteryLow) {
-      analogWrite(L_MOTOR, 0);
-      analogWrite(R_MOTOR, 0);
-      l_speed = 0;
-      r_speed = 0;
+      analogWrite(MOTOR_KANAN, 0);
+      analogWrite(MOTOR_KIRI, 0);
+      pwmKanan = 0;
+      pwmKiri  = 0;
     }
   }
 
@@ -476,8 +476,8 @@ void loop() {
   if (millis() - premillis_rx > DC_RX && !failsafeActive) {
     failsafeActive = true;
     linked         = false;   // paket berikutnya diterima berapa pun nomor urutnya
-    analogWrite(L_MOTOR, 0);
-    analogWrite(R_MOTOR, 0);
+    analogWrite(MOTOR_KANAN, 0);
+    analogWrite(MOTOR_KIRI, 0);
   }
 
   // =========================================================
