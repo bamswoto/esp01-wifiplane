@@ -20,13 +20,21 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 **WiFi modes**
 
-* At power up the plane tries `ssid_sta` (home WiFi or phone hotspot) for 8 s (3 beeps when connected).
+* At power up the plane tries `ssid_sta` (home WiFi or phone hotspot) for up to 20 s (`STA_TUNGGU_MS`, 3 beeps when connected), so a slow router doesn't push it into access point mode.
 
-* Otherwise it becomes an access point `wifiplane` on the least busy of channels 1, 6 and 11 (2 beeps). Connect the phone to it.
+* Otherwise it becomes an access point `wifiplane` on the least busy of channels 1, 6 and 11 (2 beeps). Connect the phone to it. Away from the home WiFi this takes about 20 s after power up.
 
-* OTA updates (Arduino IDE port `wifiplane-ota`, asks for `OTA_PASSWORD`) only work in STA mode, through the home WiFi or the phone hotspot, and only while the remote app isn't open: OTA and mDNS start after 10 s without control packets (`OTA_TUNDA_MS`) and stop as soon as the app sends again, so they never run during a flight. In access point mode OTA is always off. After power up without the app, wait about 10 s before uploading.
+* OTA updates (Arduino IDE port `wifiplane-ota`, asks for `OTA_PASSWORD`) go through STA mode (home WiFi or phone hotspot). Access point mode is the backup when STA can't connect: connect the PC to `wifiplane`. In both modes OTA and mDNS only run while the remote app isn't open: they start after 10 s without control packets (`OTA_TUNDA_MS`) and stop as soon as the app sends again, so they never run during a flight. After power up without the app, wait about 10 s before uploading.
 
 * The mode is picked once at power up and kept until the plane is switched off.
+
+**Safe mode**
+
+* If the firmware crashes 3 times in a row (exception or watchdog reset, `CRASH_MAKS`), for example after a bad update, the plane starts in safe mode: the motors are never driven, no beeps, the LED double blinks every second, and only WiFi (STA, else access point) and OTA run, with OTA on right away. Upload a fixed firmware over OTA, or unplug and replug the battery to try the normal start again.
+
+* After 30 s of normal running (`STABIL_MS`) the crash count goes back to 0. The count lives in RTC memory, so a power cycle also clears it.
+
+* Safe mode only helps if the new firmware still contains it and crashes after it starts. Keep the safe mode code in every version you upload.
 
 **Range settings (firmware)**
 

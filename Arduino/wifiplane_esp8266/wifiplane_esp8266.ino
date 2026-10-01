@@ -1,5 +1,5 @@
 //***************************************************
-// WiFi Controlled Tiny Airplane with OTA (STA priority + AP fallback)
+// WiFi Controlled Tiny Airplane with OTA (STA priority + AP fallback + mode aman anti boot-loop)
 // PROFIL JANGKAUAN MAKSIMUM (latensi boleh lebih tinggi)
 // Binding ala ELRS: CRC8 dengan nilai awal BIND_ID (integritas data sudah dijamin CRC-32 hardware WiFi)
 // Eksternal Voltage Divider: 33k & 8.2k
@@ -39,10 +39,21 @@
 // Password upload OTA (Arduino IDE akan memintanya saat upload lewat port jaringan).
 // Tanpa password, siapa pun di jaringan yang sama bisa mengganti firmware.
 #define OTA_PASSWORD "GANTI_PASSWORD_OTA"
-// OTA (dan mDNS) hanya aktif di mode STA (WiFi rumah / hotspot HP), dan hanya jika
-// remote Android tidak terbuka: tidak ada paket kendali valid selama OTA_TUNDA_MS.
-// Begitu paket remote datang, OTA langsung dimatikan. Di mode AP OTA tidak pernah aktif.
+// OTA (dan mDNS) hanya aktif jika remote Android tidak terbuka: tidak ada paket kendali
+// valid selama OTA_TUNDA_MS. Begitu paket remote datang, OTA langsung dimatikan.
+// Jalur utama: mode STA (WiFi rumah / hotspot HP). Mode AP: cadangan kalau STA gagal.
 #define OTA_TUNDA_MS 10000
+
+// --- MODE AMAN (anti boot-loop) ---
+// Firmware yang crash berulang (exception/watchdog) tidak boleh membuat OTA hilang.
+// Jumlah crash berturut-turut disimpan di RTC memory (bertahan saat reset karena crash,
+// hilang saat baterai dicabut). CRASH_MAKS crash berturut-turut -> mode aman: motor tidak
+// pernah digerakkan, hanya WiFi + OTA (tanpa syarat remote). Keluar dari mode aman:
+// upload firmware lewat OTA, atau cabut-pasang baterai.
+#define CRASH_MAKS 3
+#define STABIL_MS  30000      // jalan normal selama ini -> hitungan crash kembali 0
+#define RTC_BLOK   100        // blok RTC user memory (blok 0-31 dipakai core saat OTA)
+#define RTC_MAGIC  0x57504C4EUL
 
 // =========================================================
 // PROFIL JANGKAUAN
@@ -56,6 +67,10 @@
 // API Guide: yang dibatasi hanya rate awal; retransmisi tidak dibatasi.
 // Hanya berlaku untuk kiriman FC (telemetri, OTA); rate paket kendali dipilih HP.
 #define KUNCI_RATE_KIRIM_1M 1
+
+// Lama mencoba konek STA saat menyala sebelum jatuh ke mode AP. Router yang lambat atau
+// sinyal lemah bisa butuh >8 detik; di lapangan (tanpa WiFi rumah) AP siap setelah ini.
+#define STA_TUNGGU_MS 20000
 
 // Mode AP: scan saat boot lalu pilih kanal 1/6/11 dengan interferensi terendah (+2-3 detik boot).
 #define AUTO_KANAL_AP    1
@@ -108,6 +123,7 @@ bool hasilRateSta = false, hasilRateAp = false, hasilRateMask = false;
 int  hasilSupRate = -1;
 
 bool otaAktif = false;   // ArduinoOTA.begin() sudah dipanggil (end() crash jika belum)
+bool sudahStabil = false;   // hitungan crash sudah di-nol-kan setelah STABIL_MS
 
 // --- IP HP yang sedang mengontrol (tujuan telemetri unicast) ---
 IPAddress ipHP;
@@ -241,13 +257,102 @@ void playKoneksiSound(uint8_t count) {
   }
 }
 
-// --- OTA HANYA DI MODE STA, SAAT REMOTE ANDROID TIDAK TERBUKA ---
+// --- MODE AMAN: HITUNG CRASH BERTURUT-TURUT ---
+void simpanCrash(uint32_t jumlah) {
+  uint32_t data[2] = {RTC_MAGIC, jumlah};
+  ESP.rtcUserMemoryWrite(RTC_BLOK, data, sizeof(data));
+}
+
+// true = sudah CRASH_MAKS crash berturut-turut, masuk mode aman
+bool cekBootLoop() {
+  uint32_t data[2] = {0, 0};
+  ESP.rtcUserMemoryRead(RTC_BLOK, data, sizeof(data));
+  uint32_t jumlah = (data[0] == RTC_MAGIC) ? data[1] : 0;
+  uint32_t alasan = ESP.getResetInfoPtr()->reason;
+  if (alasan == REASON_EXCEPTION_RST || alasan == REASON_SOFT_WDT_RST || alasan == REASON_WDT_RST) {
+    jumlah++;     // reset karena crash
+  } else {
+    jumlah = 0;   // nyala dari baterai, restart setelah OTA, atau reset biasa
+  }
+  simpanCrash(jumlah);
+  return jumlah >= CRASH_MAKS;
+}
+
+// --- MODE WIFI ---
+// Coba konek STA maksimal STA_TUNGGU_MS (LED berkedip). true = tersambung.
+bool cobaSTA() {
+  WiFi.mode(WIFI_STA);
+  terapkanSettingRadio();          // setelah WiFi.mode(), sebelum WiFi.begin()
+  WiFi.begin(ssid_sta, pass_sta);
+
+  unsigned long startWait = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startWait < STA_TUNGGU_MS) {
+    digitalWrite(ST_LED, LOW);
+    delay(60);
+    digitalWrite(ST_LED, HIGH);
+    delay(400);
+  }
+  return WiFi.status() == WL_CONNECTED;
+}
+
+// Jadi AP sendiri di kanalAP. Panggil setelah WiFi.disconnect().
+void mulaiAP() {
+  WiFi.mode(WIFI_AP);
+  terapkanSettingRadio();        // ulangi setelah ganti mode (kembali ke 11b)
+#if EKSP_AP_RATE_1_2M
+  hasilSupRate = wifi_set_user_sup_rate(RATE_11B1M, RATE_11B2M);
+#endif
+  WiFi.softAP(ssid_ap, pass_ap, kanalAP);
+}
+
+// --- KONFIGURASI ARDUINO OTA (JANGAN DIUBAH) ---
+// begin()/end() dipanggil oleh aturOTA() di loop(), atau langsung di mode aman.
+void siapkanOTA() {
+  ArduinoOTA.setHostname("wifiplane-ota");
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+
+  ArduinoOTA.onStart([]() {
+    // Matikan motor demi keselamatan saat proses upload firmware via OTA
+    analogWrite(MOTOR_KANAN, 0);
+    analogWrite(MOTOR_KIRI, 0);
+    digitalWrite(ST_LED, LOW);
+  });
+
+  ArduinoOTA.onEnd([]() {
+    analogWrite(MOTOR_KANAN, 0);
+    analogWrite(MOTOR_KIRI, 0);
+    digitalWrite(ST_LED, HIGH);
+  });
+}
+
+// --- MODE AMAN: HANYA WIFI + OTA, TIDAK KEMBALI ---
+// Motor tidak pernah digerakkan (tanpa bunyi bip). LED: kedip ganda tiap detik.
+// OTA langsung aktif tanpa menunggu remote ditutup. Paket remote diabaikan.
+void jalankanModeAman() {
+  usingSTA = cobaSTA();
+  if (!usingSTA) {
+    WiFi.disconnect();
+    delay(100);
+    kanalAP = KANAL_AP_DEFAULT;   // tanpa scan kanal: mode aman sesederhana mungkin
+    mulaiAP();
+  }
+  siapkanOTA();
+  ArduinoOTA.begin();
+  while (true) {
+    ArduinoOTA.handle();
+    unsigned long f = millis() % 1000;
+    digitalWrite(ST_LED, (f < 100 || (f >= 200 && f < 300)) ? LOW : HIGH);
+    delay(10);
+  }
+}
+
+// --- OTA HANYA SAAT REMOTE ANDROID TIDAK TERBUKA (MODE STA, ATAU AP SEBAGAI CADANGAN) ---
 // Remote dianggap terbuka selama paket kendali valid masih datang (aplikasi mengirim
 // 250 Hz dan berhenti 1 detik setelah ditutup/di-pause). Saat boot dihitung dari 0,
 // jadi tanpa remote OTA aktif ~OTA_TUNDA_MS setelah pesawat dinyalakan.
 void aturOTA() {
   bool remoteTerbuka = (millis() - premillis_rx < OTA_TUNDA_MS);
-  bool otaBoleh      = usingSTA && !remoteTerbuka;
+  bool otaBoleh      = !remoteTerbuka;
   if (!otaBoleh && otaAktif) {
     ArduinoOTA.end();     // tutup listener OTA dan mDNS
     otaAktif = false;
@@ -258,6 +363,8 @@ void aturOTA() {
 }
 
 void setup() {
+  bool masukModeAman = cekBootLoop();   // paling awal, sebelum kode lain yang bisa crash
+
 #if DEBUG_SERIAL
   Serial.begin(115200);
 #endif
@@ -271,25 +378,15 @@ void setup() {
   pinMode(ST_LED, OUTPUT);
   digitalWrite(ST_LED, HIGH);
 
+  if (masukModeAman) jalankanModeAman();   // tidak kembali
+
   playESCStartupSound();
 
   // =========================================================
   // PRIORITAS 1: COBA KONEK SEBAGAI STA (WiFi modem rumah, atau hotspot HP)
   // =========================================================
-  WiFi.mode(WIFI_STA);
-  terapkanSettingRadio();          // setelah WiFi.mode(), sebelum WiFi.begin()
-  WiFi.begin(ssid_sta, pass_sta);
-
-  unsigned long startWait = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startWait < 8000) {
-    digitalWrite(ST_LED, LOW);
-    delay(60);
-    digitalWrite(ST_LED, HIGH);
-    delay(400);
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    // --- STA berhasil: HP hotspot ditemukan, radio fokus penuh ke STA ---
+  if (cobaSTA()) {
+    // --- STA berhasil (WiFi rumah / hotspot HP), radio fokus penuh ke STA ---
     usingSTA = true;
     playKoneksiSound(3);   // 3 bip = mode STA aktif
   } else {
@@ -305,12 +402,7 @@ void setup() {
     kanalAP = KANAL_AP_DEFAULT;
 #endif
 
-    WiFi.mode(WIFI_AP);
-    terapkanSettingRadio();        // ulangi setelah ganti mode (kembali ke 11b)
-#if EKSP_AP_RATE_1_2M
-    hasilSupRate = wifi_set_user_sup_rate(RATE_11B1M, RATE_11B2M);
-#endif
-    WiFi.softAP(ssid_ap, pass_ap, kanalAP);
+    mulaiAP();
 
     usingSTA = false;
     playKoneksiSound(2);   // 2 bip = mode AP fallback aktif
@@ -328,24 +420,7 @@ void setup() {
                 wifi_get_user_limit_rate_mask(), hasilSupRate);
 #endif
 
-  // --- KONFIGURASI ARDUINO OTA (JANGAN DIUBAH) ---
-  // ArduinoOTA.begin()/end() dipanggil oleh aturOTA() di loop(): OTA hanya aktif
-  // selama remote Android tidak terbuka, supaya tidak mengganggu penerbangan.
-  ArduinoOTA.setHostname("wifiplane-ota");
-  ArduinoOTA.setPassword(OTA_PASSWORD);
-
-  ArduinoOTA.onStart([]() {
-    // Matikan motor demi keselamatan saat proses upload firmware via OTA
-    analogWrite(MOTOR_KANAN, 0);
-    analogWrite(MOTOR_KIRI, 0);
-    digitalWrite(ST_LED, LOW);
-  });
-
-  ArduinoOTA.onEnd([]() {
-    analogWrite(MOTOR_KANAN, 0);
-    analogWrite(MOTOR_KIRI, 0);
-    digitalWrite(ST_LED, HIGH);
-  });
+  siapkanOTA();   // begin()/end() oleh aturOTA() di loop()
 
   premillis_lq = millis();
 }
@@ -353,10 +428,16 @@ void setup() {
 void loop() {
   // =========================================================
   // 0. OTA HANDLER  (JANGAN DIUBAH — selalu di paling atas)
-  //    Hanya di mode STA, saat remote Android tidak terbuka (lihat aturOTA)
+  //    Hanya saat remote Android tidak terbuka (lihat aturOTA)
   // =========================================================
   aturOTA();
   if (otaAktif) ArduinoOTA.handle();
+
+  // Sudah jalan normal STABIL_MS -> crash berikutnya dihitung dari awal lagi
+  if (!sudahStabil && millis() > STABIL_MS) {
+    simpanCrash(0);
+    sudahStabil = true;
+  }
   // =========================================================
   // 1. TERIMA PAKET UDP DENGAN VALIDASI CRC8 ALA ELRS
   //    Antrean dikuras tiap loop; hanya paket valid TERBARU yang dipakai.
