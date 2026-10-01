@@ -16,7 +16,7 @@ Kode hasil modifikasi untuk ESP-12E yang menjalankan [WIFI-CONTROLLED-RC-PLANE](
 
 * Samakan `BIND_ID` di sketch dan aplikasi, supaya HP atau pesawat lain yang memakai kode ini tidak bisa mengendalikan pesawat Anda.
 
-* Build ulang aplikasi dari `ProcessingAndroidApp/wifiplane/wifiplane.pde` di Processing (mode Android). File `wifiplane.apk` bawaan adalah versi lama dan tidak bisa dipakai dengan firmware ini. Izin yang dibutuhkan aplikasi ada di `AndroidManifest.xml`, dan izin yang kurang ditampilkan di layar. File itu juga berisi `android:configChanges` supaya aplikasi tidak restart saat ganti mode MIRING / MANUAL. Kalau Anda menyalin kode ke sketch sendiri, salin juga `AndroidManifest.xml` ke folder sketch itu (atau tambahkan atribut `android:configChanges` dari file ini ke `<activity>` di manifest Anda). Tanpa itu, ganti mode tetap jalan tapi Android membuat ulang aplikasi, sehingga trim dan BG/EX kembali ke awal.
+* Build ulang aplikasi dari `ProcessingAndroidApp/wifiplane/wifiplane.pde` di Processing (mode Android). File `wifiplane.apk` bawaan adalah versi lama dan tidak bisa dipakai dengan firmware ini. Izin yang dibutuhkan aplikasi ada di `AndroidManifest.xml`, dan izin yang kurang ditampilkan di layar. File itu juga berisi `android:configChanges` supaya aplikasi tidak restart saat ganti mode MIRING / MANUAL. Kalau Anda menyalin kode ke sketch sendiri, salin juga `AndroidManifest.xml` ke folder sketch itu (atau tambahkan atribut `android:configChanges` dari file ini ke `<activity>` di manifest Anda). Tanpa itu, ganti mode tetap jalan tapi Android membuat ulang aplikasi, sehingga BG/EX kembali ke BG (trim tetap, karena disimpan).
 
 **Mode WiFi**
 
@@ -64,23 +64,23 @@ Kode hasil modifikasi untuk ESP-12E yang menjalankan [WIFI-CONTROLLED-RC-PLANE](
 
 **Tampilan remote**
 
-Ada dua mode kemudi:
+Ada dua mode kemudi, diganti dengan tombol GANTI MODE saat terkunci:
 
-* MIRING (layar potret): belok dengan memiringkan HP, gas di slider tengah.
+* MIRING (layar potret): belok dengan memiringkan HP (sensor accelerometer), gas di slider tengah. Tanpa trim.
 
-* MANUAL (layar landscape): gas di slider kiri (ibu jari kiri, geser ke atas), belok di slider horizontal kanan-bawah (ibu jari kanan, geser ke kiri/kanan).
+* MANUAL (layar landscape): gas di slider kiri (ibu jari kiri, geser ke atas), belok di slider horizontal kanan-bawah (ibu jari kanan, geser ke kiri/kanan), trim di atas slider belok.
 
 Mode MIRING:
 
-| Siap | Terbang | HOLD, sinyal lemah | Link putus |
+| Siap | Terbang, belok kiri | Sinyal lemah | Link putus |
 |---|---|---|---|
-| ![Siap](ProcessingAndroidApp/tampilan/1_siap.png) | ![Terbang](ProcessingAndroidApp/tampilan/2_terbang.png) | ![HOLD](ProcessingAndroidApp/tampilan/3_hold_sinyal_lemah.png) | ![Link putus](ProcessingAndroidApp/tampilan/4_link_putus.png) |
+| ![Siap](ProcessingAndroidApp/tampilan/1_siap.png) | ![Terbang](ProcessingAndroidApp/tampilan/2_terbang.png) | ![Sinyal lemah](ProcessingAndroidApp/tampilan/3_sinyal_lemah.png) | ![Link putus](ProcessingAndroidApp/tampilan/4_link_putus.png) |
 
 Mode MANUAL:
 
-| Terbang, belok kanan | HOLD, belok kiri penuh, sinyal lemah |
+| Terbang, belok kanan | Belok kiri penuh, sinyal lemah |
 |---|---|
-| ![Manual terbang](ProcessingAndroidApp/tampilan/5_manual_terbang.png) | ![Manual HOLD](ProcessingAndroidApp/tampilan/6_manual_hold_sinyal_lemah.png) |
+| ![Manual terbang](ProcessingAndroidApp/tampilan/5_manual_terbang.png) | ![Manual sinyal lemah](ProcessingAndroidApp/tampilan/6_manual_sinyal_lemah.png) |
 
 Gambar di atas dirender dari kode `draw()` yang sama; huruf di HP bisa sedikit berbeda.
 
@@ -88,27 +88,27 @@ Gambar di atas dirender dari kode `draw()` yang sama; huruf di HP bisa sedikit b
 
 * Di bawahnya muncul satu pesan kalau ada yang perlu diperhatikan: link putus, baterai lemah, sinyal lemah, izin kurang, atau petunjuk saat siap terbang.
 
-* Tombol trim, tombol BELOK (BG/EX), tombol HOLD, dan output motor kiri dan kanan dalam persen, dihitung dengan rumus yang sama dengan paket yang dikirim.
+* BELOK: pilihan BG (belok halus) atau EX (belok tajam), yang aktif disorot. Ketuk untuk mengganti. Berlaku di kedua mode.
 
-* Mode MIRING: indikator belok dari kemiringan HP di bawah slider gas. Mode MANUAL: slider belok di kanan-bawah, tepat di bawah tombol HOLD.
+* GANTI MODE: ikonnya menunjukkan posisi HP setelah diganti (MANUAL = landscape, MIRING = potret).
 
-* Tombol ganti mode: MANUAL (potret, di samping indikator belok) dan MIRING (landscape, di samping chip status). Ikonnya menunjukkan posisi HP setelah diganti.
+* Mode MIRING: output motor kiri dan kanan dalam persen di kiri-kanan slider gas (dihitung dengan rumus yang sama dengan paket yang dikirim), dan indikator kemiringan HP di bawahnya.
 
-* Tombol AKTIFKAN / AKTIF.
+* Mode MANUAL: trim kiri dan kanan ([−] nilai [+]) di atas slider belok, supaya bisa diketuk ibu jari kanan. AKTIFKAN di kiri-bawah, jauh dari titik ibu jari kanan.
 
 * Setiap tombol bergetar singkat saat diketuk.
 
 **Kendali dan keselamatan**
 
-* Multi-touch: setiap jari dibaca sendiri, jadi gas, belok dan tombol bisa dipakai bersamaan, misalnya menahan gas sambil mengetuk HOLD atau trim dengan jari lain.
+* Multi-touch: setiap jari dibaca sendiri, jadi gas, belok dan tombol bisa dipakai bersamaan, misalnya menahan gas sambil mengetuk trim atau BG/EX dengan jari lain.
 
 * Gas: sentuh dan geser slider gas, atas = penuh. Gas langsung mengikuti jari saat slider disentuh, dan hanya jari yang mulai menyentuh di slider saat AKTIF yang mengubah gas; jari lain yang ikut menyentuh slider diabaikan. Jari gas diangkat membuat gas menjadi 0, walaupun jari lain masih menyentuh layar, sehingga motor mati saat pesawat jatuh. Saat gas 0, kedua motor mati, apa pun kemiringan, slider belok dan trim-nya.
 
 * Belok (mode MANUAL): kenop mengikuti jari, ujung slider sama dengan HP miring 90 derajat di mode MIRING, dan BG/EX tetap berlaku. Jari diangkat membuat pesawat lurus lagi. Ada zona mati kecil di tengah. Di mode MANUAL kemiringan HP tidak dipakai.
 
-* HOLD (oranye saat aktif, hanya saat AKTIF): gas ditahan walaupun jari diangkat, sehingga trim atau BG/EX bisa diatur saat terbang. Ketuk lagi untuk mematikannya, yang juga membuat gas menjadi 0; kalau jari masih di slider gas, angkat dulu untuk memberi gas lagi.
+* Trim (hanya mode MANUAL): TRIM KIRI menambah motor kanan (pesawat cenderung ke kiri), TRIM KANAN menambah motor kiri. Batas ±30 per trim. Nilainya disimpan di memori aplikasi setiap kali diketuk, jadi tetap ada saat aplikasi ditutup dan dibuka lagi. Di mode MIRING trim tidak dipakai.
 
-* AKTIFKAN / AKTIF mengunci dan membuka kendali. Mengunci juga mematikan HOLD dan membuat gas menjadi 0. Jari yang sudah ada di slider gas saat AKTIFKAN diketuk tidak memberi gas; angkat dan sentuh lagi.
+* AKTIFKAN / AKTIF mengunci dan membuka kendali. Mengunci membuat gas menjadi 0. Jari yang sudah ada di slider gas saat AKTIFKAN diketuk tidak memberi gas; angkat dan sentuh lagi.
 
 * Ganti mode hanya bisa saat terkunci. Saat AKTIF, tombolnya redup dan muncul pesan "Kunci dulu untuk ganti mode". Layar landscape dikunci ke satu arah (tidak ikut sensor), jadi tidak berputar sendiri saat terbang. Kalau bentuk layar tetap berubah saat AKTIF (misalnya layar terpisah), kendali langsung dikunci.
 

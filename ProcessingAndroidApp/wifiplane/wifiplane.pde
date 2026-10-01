@@ -10,11 +10,11 @@
 //   BC = broadcast ke subnet FC, saat HP jadi hotspot (FC mode STA): frame grup, tanpa retry MAC.
 //        Tidak ditahan sampai beacon DTIM selama FC tidak sleep dan tidak ada perangkat lain di hotspot
 //   UC = unicast ke IP FC, saat HP klien Wi-Fi (FC mode AP, atau router rumah): ACK + retry MAC
-// Dua mode kemudi, diganti dengan tombol MANUAL / MIRING saat terkunci:
-//   MIRING (potret) = belok dengan memiringkan HP, gas di slider tengah
-//   MANUAL (landscape) = gas di slider kiri, belok di slider horizontal kanan-bawah
-// Gas: jari lepas = gas 0 (safety saat pesawat jatuh). Tombol HOLD menahan gas
-//   supaya trim bisa diatur; tekan HOLD lagi = HOLD mati + gas 0.
+// Dua mode kemudi, diganti dengan tombol GANTI MODE saat terkunci:
+//   MIRING (potret) = belok dengan memiringkan HP (accelerometer), gas di slider tengah, tanpa trim
+//   MANUAL (landscape) = gas di slider kiri, belok di slider horizontal kanan-bawah, dengan trim
+//     (trim disimpan di memori aplikasi, tetap ada saat aplikasi dibuka lagi)
+// Gas: jari lepas = gas 0 (safety saat pesawat jatuh).
 //   Gas 0 = kedua motor mati, kemiringan HP, slider belok dan trim tidak memutar motor.
 // Multi-touch: setiap jari dilacak sendiri, jadi gas, belok dan tombol bisa dipakai bersamaan.
 // Jaringan Wi-Fi tanpa internet (AP FC) di-request agar tidak dilepas sistem,
@@ -24,13 +24,14 @@
 //   Izin yang kurang ditampilkan di layar.
 // AndroidManifest.xml: activity memakai android:configChanges (orientation|screenSize|...)
 //   supaya ganti mode MANUAL/MIRING tidak me-restart aplikasi. Tanpa itu ganti mode tetap
-//   jalan, tapi Android membuat ulang aplikasi (trim dan BG/EX kembali ke awal).
+//   jalan, tapi Android membuat ulang aplikasi (BG/EX kembali ke BG; trim tetap karena disimpan).
 //***************************************************
 
 import hypermedia.net.*;
 import ketai.sensors.*;
 import ketai.ui.*;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
@@ -59,6 +60,9 @@ final float DIFF_EX = 7.0;   // mode EX
 // Slider belok di ujung = HP miring 90 derajat.
 final float MIRING_PENUH = 8.3;
 
+// Trim (mode MANUAL): batas per tombol, disimpan di SharedPreferences
+final int TRIM_MAKS = 30;
+
 // Peringatan getar
 final int VBAT_WARN     = 30;    // baterai < 3.0 V, sama dengan batas pemutus motor di FC
 final int LQ_WARN       = 50;    // LQ < 50% saat AKTIF
@@ -73,9 +77,8 @@ final int KIRIM_SETELAH_PAUSE_MS = 1000;
 // =========================================================
 volatile int gas          = 0;
 volatile int lock         = 0;
-volatile boolean hold     = false;   // true = gas ditahan walau jari lepas (untuk atur trim)
-volatile int trimKiri     = 0;   // tombol kolom kiri: tambah motor kanan -> belok kiri
-volatile int trimKanan    = 0;   // tombol kolom kanan: tambah motor kiri -> belok kanan
+volatile int trimKiri     = 0;   // TRIM KIRI: tambah motor kanan -> belok kiri (hanya mode MANUAL)
+volatile int trimKanan    = 0;   // TRIM KANAN: tambah motor kiri -> belok kanan (hanya mode MANUAL)
 volatile float accelerometerX = 0;
 volatile float diff_power = DIFF_BG;
 volatile boolean kemudiSlider = false;   // true = mode MANUAL (layar landscape, belok dari slider)
@@ -126,8 +129,8 @@ final int W_BIRU   = 0xFF38BDF8;
 final int W_HIJAU  = 0xFF22C55E;
 final int W_KUNING = 0xFFF5B30B;
 final int W_MERAH  = 0xFFEF4444;
-final int W_ORANYE = 0xFFFB923C;
 final int W_UNGU   = 0xFFA78BFA;
+final int W_TOMBOL = 0xFF24324A;   // tombol di dalam kartu
 
 // Area tombol [x, y, lebar, tinggi], dihitung ulang tiap frame oleh aturTata()
 // dan dipakai juga untuk mendeteksi sentuhan
@@ -135,8 +138,9 @@ float[] rTrimKiriTambah  = new float[4];
 float[] rTrimKiriKurang  = new float[4];
 float[] rTrimKananTambah = new float[4];
 float[] rTrimKananKurang = new float[4];
+float[] rKartuTrimKiri  = new float[4];
+float[] rKartuTrimKanan = new float[4];
 float[] rMode  = new float[4];
-float[] rHold  = new float[4];
 float[] rGas   = new float[4];
 float[] rAktif = new float[4];
 float[] rLayar = new float[4];        // tombol ganti mode MANUAL / MIRING
@@ -185,6 +189,7 @@ void setup() {
     orientation(PORTRAIT);
   }
 
+  muatTrim();
   keepScreenOn();
   setupPowerAndWifiLocks();
   setupWifiBinding();
@@ -282,7 +287,7 @@ void senderLoop() {
 
       if (target != null && kirim) {
         // --- Snapshot state (volatile read) lalu susun paket 5 byte ---
-        isiPaket(buf, seq, gas, trimKiri, trimKanan, nilaiBelok(), diff_power, lock);
+        isiPaket(buf, seq, gas, trimKiriAktif(), trimKananAktif(), nilaiBelok(), diff_power, lock);
 
         // --- Kirim (buffer yang sama, packet yang sama) ---
         pkt.setAddress(target);
@@ -353,6 +358,15 @@ int pwmMotor(int g, int trim, float belok) {
 // dari slider di mode MANUAL (slider ke kanan = belok kanan)
 float nilaiBelok() {
   return kemudiSlider ? -belokSlider * MIRING_PENUH : accelerometerX;
+}
+
+// Trim hanya dipakai di mode MANUAL; di mode MIRING belok dikoreksi dengan kemiringan HP
+int trimKiriAktif() {
+  return kemudiSlider ? trimKiri : 0;
+}
+
+int trimKananAktif() {
+  return kemudiSlider ? trimKanan : 0;
 }
 
 // =========================================================
@@ -452,6 +466,11 @@ void aturTata() {
   else           aturTataPotret();
 }
 
+// Potret (mode MIRING):
+//   BELOK BG/EX          GAS          GANTI MODE
+//   MOTOR KIRI        (slider)        MOTOR KANAN
+//   indikator kemiringan HP
+//   AKTIFKAN
 void aturTataPotret() {
   u = width / 100.0;
   float m  = 4 * u;                    // margin tepi
@@ -460,7 +479,7 @@ void aturTataPotret() {
   float y0 = 0.215 * height;           // awal area utama
   float y1 = 0.795 * height;           // akhir area utama
   float xKanan = width - m - kolom;
-  float tTombol = 0.08 * height;
+  float tKartu = 0.1 * height;         // tinggi kartu BELOK dan GANTI MODE
 
   xKepala = m;
   yJudul  = m + 0.018 * height;
@@ -469,34 +488,45 @@ void aturTataPotret() {
   isi(rChip,   m, 0.085 * height, width - 2 * m, 0.07 * height);
   isi(rBanner, m, 0.165 * height, width - 2 * m, 0.04 * height);
 
-  isi(rTrimKiriTambah,  m,      y0 + 0.03 * height,  kolom, tTombol);
-  isi(rTrimKiriKurang,  m,      y0 + 0.17 * height,  kolom, tTombol);
-  isi(rTrimKananTambah, xKanan, y0 + 0.03 * height,  kolom, tTombol);
-  isi(rTrimKananKurang, xKanan, y0 + 0.17 * height,  kolom, tTombol);
-  isi(rMode,            m,      y0 + 0.275 * height, kolom, 0.085 * height);
-  isi(rHold,            xKanan, y0 + 0.275 * height, kolom, 0.085 * height);
+  isi(rMode,  m,      y0, kolom, tKartu);
+  isi(rLayar, xKanan, y0, kolom, tKartu);
   isi(rGas, m + kolom + jk, y0, width - 2 * (m + kolom + jk), y1 - y0);
-  float yMotor = rMode[1] + rMode[3] + 0.025 * height;
+  float yMotor = y0 + tKartu + 0.02 * height;
   isi(rMotorKiri,  m,      yMotor, kolom, y1 - yMotor);
   isi(rMotorKanan, xKanan, yMotor, kolom, y1 - yMotor);
-  isi(rIndikator, m,      0.805 * height, width - 2 * m - kolom - jk, 0.05 * height);
-  isi(rLayar,     xKanan, 0.805 * height, kolom, 0.05 * height);
-  isi(rBelok, 0, 0, 0, 0);
+  isi(rIndikator, m, 0.807 * height, width - 2 * m, 0.045 * height);
   isi(rAktif, m, 0.865 * height, width - 2 * m, height - m - 0.865 * height);
+
+  // Tidak ada di potret
+  isi(rBelok, 0, 0, 0, 0);
+  isi(rKartuTrimKiri, 0, 0, 0, 0);
+  isi(rKartuTrimKanan, 0, 0, 0, 0);
+  isi(rTrimKiriKurang, 0, 0, 0, 0);
+  isi(rTrimKiriTambah, 0, 0, 0, 0);
+  isi(rTrimKananKurang, 0, 0, 0, 0);
+  isi(rTrimKananTambah, 0, 0, 0, 0);
 }
 
-// Landscape: gas di kiri (ibu jari kiri), belok di kanan-bawah (ibu jari kanan),
-// HOLD tepat di atas slider belok. AKTIFKAN dipisah dari slider belok oleh output motor.
+// Landscape (mode MANUAL):
+//   GAS   | judul, chip status, GANTI MODE, pesan
+//  (slider| BELOK BG/EX    TRIM KIRI  TRIM KANAN
+//   kiri) | AKTIFKAN       slider belok
+// Gas untuk ibu jari kiri, slider belok dan trim di atasnya untuk ibu jari kanan.
+// AKTIFKAN jauh dari titik ibu jari kanan (tengah slider belok).
 void aturTataLandscape() {
   u = height / 100.0;
   float m  = 4 * u;
   float jk = 3 * u;
-  float x0 = m + 28 * u + 5 * u;       // area di kanan slider gas
+  float x0 = m + 28 * u + 6 * u;       // area di kanan slider gas
   float lebar = width - m - x0;
-  float kolom = (lebar - 3 * jk) / 4;  // empat kolom
-  float yA = 40 * u;                   // baris trim, BELOK, HOLD
-  float yB = 75 * u;                   // baris AKTIFKAN, motor, slider belok
-  float tB = height - m - yB;
+  float jc = 2 * u;                    // jarak antar chip
+  float wc = (lebar - 4 * jc) / 5;     // 4 chip status + GANTI MODE
+  float wKanan = constrain(0.5 * lebar, 82 * u, 96 * u);   // trim + slider belok
+  float jBlok  = 5 * u;
+  float wKiri  = lebar - wKanan - jBlok;                     // BELOK + AKTIFKAN
+  float xKanan = x0 + wKiri + jBlok;
+  float yA = 40 * u, tA = 24 * u;      // baris BELOK, trim
+  float yB = 67 * u, tB = height - m - yB;   // baris AKTIFKAN, slider belok
 
   isi(rGas, m, m, 28 * u, height - 2 * m);
 
@@ -504,24 +534,33 @@ void aturTataLandscape() {
   yJudul  = m + 3.5 * u;
   ySub    = yJudul + u;
   tPil    = 7 * u;
-  isi(rChip,   x0, 14 * u, lebar - kolom - jk, 13 * u);
-  isi(rLayar,  width - m - kolom, 14 * u, kolom, 13 * u);
+  isi(rChip,   x0, 14 * u, 4 * wc + 3 * jc, 13 * u);
+  isi(rLayar,  x0 + 4 * (wc + jc), 14 * u, wc, 13 * u);
   isi(rBanner, x0, 30 * u, lebar, 7 * u);
 
-  float xK2 = x0 + kolom + jk, xK3 = xK2 + kolom + jk, xK4 = xK3 + kolom + jk;
-  isi(rTrimKiriTambah,  x0,  yA + 3.5 * u,  kolom, 10 * u);
-  isi(rTrimKiriKurang,  x0,  yA + 21.5 * u, kolom, 10 * u);
-  isi(rTrimKananTambah, xK2, yA + 3.5 * u,  kolom, 10 * u);
-  isi(rTrimKananKurang, xK2, yA + 21.5 * u, kolom, 10 * u);
-  isi(rMode, xK3, yA + 3.5 * u, kolom, 28 * u);
-  isi(rHold, xK4, yA + 3.5 * u, kolom, 28 * u);
+  isi(rMode,  x0, yA, wKiri, tA);
+  isi(rAktif, x0, yB, wKiri, tB);
+  float wTrim = (wKanan - jk) / 2;
+  isi(rKartuTrimKiri,  xKanan, yA, wTrim, tA);
+  isi(rKartuTrimKanan, xKanan + wTrim + jk, yA, wTrim, tA);
+  aturStepper(rKartuTrimKiri,  rTrimKiriKurang,  rTrimKiriTambah);
+  aturStepper(rKartuTrimKanan, rTrimKananKurang, rTrimKananTambah);
+  isi(rBelok, xKanan, yB, wKanan, tB);
 
-  isi(rAktif, x0, yB, kolom, tB);
-  float wMotor = (kolom - 1.5 * u) / 2;
-  isi(rMotorKiri,  xK2, yB, wMotor, tB);
-  isi(rMotorKanan, xK2 + wMotor + 1.5 * u, yB, wMotor, tB);
-  isi(rBelok, xK3, yB, 2 * kolom + jk, tB);
+  // Tidak ada di landscape
+  isi(rMotorKiri, 0, 0, 0, 0);
+  isi(rMotorKanan, 0, 0, 0, 0);
   isi(rIndikator, 0, 0, 0, 0);
+}
+
+// Tombol [-] dan [+] di dalam kartu trim, di bawah judul
+void aturStepper(float[] k, float[] kurang, float[] tambah) {
+  float p  = 1.5 * u;
+  float yb = k[1] + 7.5 * u;
+  float tb = k[1] + k[3] - p - yb;
+  float lb = min(tb * 1.25, (k[2] - 2 * p) * 0.36);
+  isi(kurang, k[0] + p, yb, lb, tb);
+  isi(tambah, k[0] + k[2] - p - lb, yb, lb, tb);
 }
 
 void isi(float[] r, float x, float y, float w, float h) {
@@ -531,8 +570,8 @@ void isi(float[] r, float x, float y, float w, float h) {
   r[3] = h;
 }
 
-boolean di(float[] r, float x, float y) {
-  return x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3];
+boolean di(float[] r, float x, float y) {   // area kosong (lebar 0) tidak pernah kena
+  return r[2] > 0 && x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3];
 }
 
 // =========================================================
@@ -546,21 +585,21 @@ void draw() {
   noStroke();
   gambarKepala(tlmAda);
   gambarPeringatan(tlmAda);
-  gambarTrim(rTrimKiriTambah, rTrimKiriKurang, "TRIM KIRI", trimKiri);
-  gambarTrim(rTrimKananTambah, rTrimKananKurang, "TRIM KANAN", trimKanan);
   gambarTombolMode();
-  gambarTombolHold();
-  gambarGas();
-
-  // Output motor, dihitung dengan rumus yang sama seperti paket
-  float belok = nilaiBelok() * diff_power;
-  boolean jalan = lock == 1 && gas > 0;
-  gambarMotor(rMotorKiri, "MOTOR KIRI", jalan ? pwmMotor(gas, trimKanan, -belok) : 0);
-  gambarMotor(rMotorKanan, "MOTOR KANAN", jalan ? pwmMotor(gas, trimKiri, belok) : 0);
-
-  if (kemudiSlider) gambarSliderBelok();
-  else              gambarBelok();
   gambarTombolLayar();
+  gambarGas();
+  if (kemudiSlider) {
+    gambarTrim(rKartuTrimKiri, rTrimKiriKurang, rTrimKiriTambah, "TRIM KIRI", trimKiri);
+    gambarTrim(rKartuTrimKanan, rTrimKananKurang, rTrimKananTambah, "TRIM KANAN", trimKanan);
+    gambarSliderBelok();
+  } else {
+    // Output motor, dihitung dengan rumus yang sama seperti paket
+    float belok = nilaiBelok() * diff_power;
+    boolean jalan = lock == 1 && gas > 0;
+    gambarMotor(rMotorKiri, "MOTOR KIRI", jalan ? pwmMotor(gas, trimKananAktif(), -belok) : 0);
+    gambarMotor(rMotorKanan, "MOTOR KANAN", jalan ? pwmMotor(gas, trimKiriAktif(), belok) : 0);
+    gambarBelok();
+  }
   gambarTombolAktif();
 
   // Getar (time-based, tidak blocking UI):
@@ -757,53 +796,56 @@ void ukuranMuat(String t, float ukuran, float maks) {
   if (w > maks) textSize(ukuran * maks / w);
 }
 
-void gambarTrim(float[] rTambah, float[] rKurang, String judul, int nilaiTrim) {
-  label(judul, rTambah[0] + rTambah[2] / 2, rTambah[1] - 3 * u);
-  kartu(rTambah, warnaKartu(rTambah));
-  kartu(rKurang, warnaKartu(rKurang));
-  fill(W_TEKS);
-  textSize(8 * u);
-  textAlign(CENTER, CENTER);
-  text("+", rTambah[0] + rTambah[2] / 2, rTambah[1] + rTambah[3] / 2);
-  text("\u2212", rKurang[0] + rKurang[2] / 2, rKurang[1] + rKurang[3] / 2);
-  float yNilai = (rTambah[1] + rTambah[3] + rKurang[1]) / 2;
+// Kartu trim: judul, lalu [-] nilai [+]
+void gambarTrim(float[] k, float[] rKurang, float[] rTambah, String judul, int nilaiTrim) {
+  kartu(k, W_KARTU);
+  label(judul, k[0] + k[2] / 2, k[1] + 4 * u);
+  tombolKecil(rKurang, "\u2212");
+  tombolKecil(rTambah, "+");
   fill(nilaiTrim == 0 ? W_REDUP : W_TEKS);
-  textSize(6 * u);
-  text((nilaiTrim > 0 ? "+" : "") + nilaiTrim, rTambah[0] + rTambah[2] / 2, yNilai);
+  textAlign(CENTER, CENTER);
+  textSize(5 * u);
+  text((nilaiTrim > 0 ? "+" : "") + nilaiTrim, k[0] + k[2] / 2, rKurang[1] + rKurang[3] / 2);
 }
 
+void tombolKecil(float[] r, String t) {
+  fill(r == rDitekan ? W_TEKAN : W_TOMBOL);
+  rect(r[0], r[1], r[2], r[3], 2.5 * u);
+  fill(W_TEKS);
+  textAlign(CENTER, CENTER);
+  textSize(6 * u);
+  text(t, r[0] + r[2] / 2, r[1] + r[3] / 2);
+}
+
+// BELOK: pilihan BG (belok halus) | EX (belok tajam), yang aktif disorot. Ketuk = ganti.
 void gambarTombolMode() {
   boolean ex = exprt_flag == 1;
+  float x = rMode[0], y = rMode[1], w = rMode[2], h = rMode[3];
+  float cy = y + h / 2;
   kartu(rMode, warnaKartu(rMode));
-  float cy = rMode[1] + rMode[3] / 2;
-  label("BELOK", rMode[0] + rMode[2] / 2, cy - 4.9 * u);
+  label("BELOK", x + w / 2, cy - 4.9 * u);
+  float pw = min(w - 4 * u, 34 * u);
+  float ph = 7 * u;
+  float px = x + (w - pw) / 2;
+  float py = cy + 2.7 * u - ph / 2;
+  float sw = pw / 2;
+  fill(W_LATAR);
+  rect(px, py, pw, ph, ph / 2);
   fill(ex ? W_UNGU : W_BIRU);
-  textSize(6 * u);
+  rect(ex ? px + sw : px, py, sw, ph, ph / 2);
   textAlign(CENTER, CENTER);
-  text(ex ? "EX" : "BG", rMode[0] + rMode[2] / 2, cy + 2.7 * u);
-}
-
-void gambarTombolHold() {
-  if (hold) {
-    fill(W_ORANYE);
-    rect(rHold[0], rHold[1], rHold[2], rHold[3], 3 * u);
-  } else {
-    kartu(rHold, warnaKartu(rHold));
-  }
-  float cy = rHold[1] + rHold[3] / 2;
-  fill(hold ? W_LATAR : (lock == 1 ? W_TEKS : W_REDUP));
-  textSize(2.4 * u);
-  textAlign(CENTER, CENTER);
-  text(hold ? "GAS DITAHAN" : "TAHAN GAS", rHold[0] + rHold[2] / 2, cy - 4.9 * u);
-  textSize(6 * u);
-  text("HOLD", rHold[0] + rHold[2] / 2, cy + 2.7 * u);
+  textSize(3.4 * u);
+  fill(ex ? W_REDUP : W_LATAR);
+  text("BG", px + sw / 2, py + ph / 2);
+  fill(ex ? W_LATAR : W_REDUP);
+  text("EX", px + sw * 1.5, py + ph / 2);
 }
 
 void gambarGas() {
   kartu(rGas, W_KARTU);
   float x = rGas[0], y = rGas[1], w = rGas[2], h = rGas[3];
   // Isi gas dari bawah
-  int warna = lock == 0 ? W_REDUP : hold ? W_ORANYE : W_BIRU;
+  int warna = lock == 0 ? W_REDUP : W_BIRU;
   float hIsi = h * gas / 127.0;
   float yIsi = y + h - hIsi;
   if (hIsi > 0) {
@@ -824,19 +866,19 @@ void gambarGas() {
   textAlign(CENTER, CENTER);
   text("GAS", x + w / 2, y + 4.3 * u);
   float maks = w - 8 * u;   // tidak menabrak tanda skala di tepi
+  float yTeks = y + h * 0.42;   // di antara tanda skala 50% dan 75%
   if (lock == 0) {
     fill(W_REDUP);
     ukuranMuat("TERKUNCI", 5 * u, maks);
-    text("TERKUNCI", x + w / 2, y + h / 2);
+    text("TERKUNCI", x + w / 2, yTeks);
   } else {
-    float yTeks = y + h * 0.42;
     String persen = round(gas * 100 / 127.0) + "%";
     fill(W_TEKS);
     ukuranMuat("100%", 13 * u, maks);   // ukuran tetap, tidak berubah saat gas berubah
     text(persen, x + w / 2, yTeks);
     // Di atas isian gas tulisan dibuat terang supaya tetap terbaca
     fill(yIsi < yTeks + 9 * u ? W_TEKS : W_REDUP, yIsi < yTeks + 9 * u ? 220 : 255);
-    String petunjuk = hold ? "GAS DITAHAN" : "geser untuk gas";
+    String petunjuk = "geser untuk gas";
     ukuranMuat(petunjuk, 2.8 * u, maks);
     text(petunjuk, x + w / 2, yTeks + 9 * u);
   }
@@ -928,16 +970,13 @@ void gambarTombolLayar() {
   float x = rLayar[0], y = rLayar[1], w = rLayar[2], h = rLayar[3];
   int warna = lock == 0 ? W_TEKS : W_REDUP;
   String t = kemudiSlider ? "MIRING" : "MANUAL";
-  fill(warnaKartu(rLayar));
-  rect(x, y, w, h, kemudiSlider ? 3 * u : h / 2);
-  float yv = y + h / 2;
-  if (kemudiSlider) {   // kartu setinggi chip: judul di atas
-    label("GANTI MODE", x + w / 2, y + 0.257 * h);
-    yv = y + 0.671 * h;
-  }
+  kartu(rLayar, warnaKartu(rLayar));
+  boolean chip = h < 16 * u;   // landscape: setinggi chip status
+  label("GANTI MODE", x + w / 2, chip ? y + 0.257 * h : y + h / 2 - 4.9 * u);
+  float yv = chip ? y + 0.671 * h : y + h / 2 + 2.7 * u;
   float iw = kemudiSlider ? 2.4 * u : 4.2 * u;
   float ih = kemudiSlider ? 4.2 * u : 2.4 * u;
-  textSize(3 * u);
+  ukuranMuat(t, 3.4 * u, w - iw - 5 * u);
   float lebar = iw + 1.6 * u + textWidth(t);
   float xi = x + (w - lebar) / 2;
   noFill();
@@ -997,7 +1036,7 @@ void onAccelerometerEvent(float x, float y, float z) {
 // Setiap jari dilacak dengan id-nya, jadi gas, belok dan tombol bisa dipakai bersamaan.
 // Tombol bereaksi saat disentuh, dengan getar singkat.
 // Slider dikendalikan jari yang mulai menyentuh di slider itu (jari lain di atasnya diabaikan):
-//   gas  : hanya sentuhan yang dimulai saat AKTIF; jari lepas = gas 0 (kecuali HOLD)
+//   gas  : hanya sentuhan yang dimulai saat AKTIF; jari lepas = gas 0
 //   belok: jari lepas = kembali lurus
 // =========================================================
 void touchStarted() {
@@ -1048,7 +1087,7 @@ void sentuhan(boolean mulai) {
 void lepas(boolean gasAda, boolean belokAda, boolean tombolAda) {
   if (idGas >= 0 && !gasAda) {
     idGas = -1;
-    if (!hold) gas = 0;   // jari lepas = gas 0 (safety saat pesawat jatuh), kecuali HOLD
+    gas = 0;   // jari lepas = gas 0 (safety saat pesawat jatuh)
   }
   if (idBelok >= 0 && !belokAda) {
     idBelok = -1;
@@ -1072,16 +1111,16 @@ void jariTurun(int id, float x, float y) {
   } else if (kemudiSlider && di(rBelok, x, y)) {
     if (idBelok < 0) idBelok = id;
   } else if (di(rTrimKiriTambah, x, y)) {
-    trimKiri++;
+    ubahTrim(1, 0);
     tekan(rTrimKiriTambah, id);
   } else if (di(rTrimKiriKurang, x, y)) {
-    trimKiri--;
+    ubahTrim(-1, 0);
     tekan(rTrimKiriKurang, id);
   } else if (di(rTrimKananTambah, x, y)) {
-    trimKanan++;
+    ubahTrim(0, 1);
     tekan(rTrimKananTambah, id);
   } else if (di(rTrimKananKurang, x, y)) {
-    trimKanan--;
+    ubahTrim(0, -1);
     tekan(rTrimKananKurang, id);
   } else if (di(rMode, x, y)) {
     if (exprt_flag == 0) {
@@ -1092,22 +1131,9 @@ void jariTurun(int id, float x, float y) {
       diff_power = DIFF_BG;
     }
     tekan(rMode, id);
-  } else if (di(rHold, x, y)) {
-    // HOLD: aktif = gas ditahan; ditekan lagi = HOLD mati dan gas langsung 0
-    // (jari yang masih di slider gas harus diangkat dulu untuk memberi gas lagi)
-    if (hold) {
-      hold  = false;
-      gas   = 0;
-      idGas = -1;
-      tekan(rHold, id);
-    } else if (lock == 1) {
-      hold = true;
-      tekan(rHold, id);
-    }
   } else if (di(rAktif, x, y)) {
     if (lock == 0) {
       gas   = 0;
-      hold  = false;
       idGas = -1;
       lock  = 1;
     } else {
@@ -1121,11 +1147,10 @@ void jariTurun(int id, float x, float y) {
   }
 }
 
-// Kunci kendali: motor 0, HOLD mati, slider dilepas
+// Kunci kendali: motor 0, slider dilepas
 void kunci() {
   lock        = 0;
   gas         = 0;
-  hold        = false;
   belokSlider = 0;
   idGas       = -1;
   idBelok     = -1;
@@ -1143,6 +1168,40 @@ void aturBelok(float x) {
   if (v > DZ)       belokSlider = (v - DZ) / (1 - DZ);
   else if (v < -DZ) belokSlider = (v + DZ) / (1 - DZ);
   else              belokSlider = 0;
+}
+
+// =========================================================
+// TRIM (mode MANUAL), disimpan di memori aplikasi (SharedPreferences)
+// supaya tidak perlu diatur ulang saat aplikasi dibuka lagi
+// =========================================================
+void ubahTrim(int dKiri, int dKanan) {
+  trimKiri  = constrain(trimKiri + dKiri, -TRIM_MAKS, TRIM_MAKS);
+  trimKanan = constrain(trimKanan + dKanan, -TRIM_MAKS, TRIM_MAKS);
+  simpanTrim();
+}
+
+SharedPreferences pengaturan() {
+  return getActivity().getSharedPreferences("wifiplane", Context.MODE_PRIVATE);
+}
+
+void muatTrim() {
+  try {
+    SharedPreferences p = pengaturan();
+    trimKiri  = constrain(p.getInt("trimKiri", 0), -TRIM_MAKS, TRIM_MAKS);
+    trimKanan = constrain(p.getInt("trimKanan", 0), -TRIM_MAKS, TRIM_MAKS);
+  }
+  catch (Exception e) {
+    println("Gagal membaca trim: " + e.getMessage());
+  }
+}
+
+void simpanTrim() {
+  try {
+    pengaturan().edit().putInt("trimKiri", trimKiri).putInt("trimKanan", trimKanan).apply();   // apply(): tidak memblok UI
+  }
+  catch (Exception e) {
+    println("Gagal menyimpan trim: " + e.getMessage());
+  }
 }
 
 void tekan(float[] r, int id) {
