@@ -67,6 +67,7 @@ final int TRIM_MAKS = 30;
 // Peringatan getar
 final int VBAT_WARN     = 30;    // baterai < 3.0 V, sama dengan batas pemutus motor di FC
 final int LQ_WARN       = 50;    // LQ < 50% saat AKTIF
+final int KIRIM_MIN     = 200;   // paket kendali terkirim/detik di bawah ini (normal ~250) ditampilkan kuning
 final int TLM_HILANG_MS = 2000;  // telemetri hilang > 2 detik = link putus
 
 // Setelah app ter-pause, kirim 0/0 selama ini lalu berhenti (FC failsafe sendiri)
@@ -99,8 +100,9 @@ volatile long lastTelemetryMs = -100000;
 volatile InetAddress ipKlienHp = null;   // null = HP bukan klien Wi-Fi (mis. HP jadi hotspot)
 volatile int rssiHp = 0;                 // RSSI yang diukur HP, dipakai saat FC mode AP (FC kirim 0)
 
-// Paket terkirim/detik dari HP (ditulis sender thread)
+// Paket kendali terkirim/detik dari HP (ditulis sender thread, ditampilkan di chip LQ)
 volatile int txPerDetik = 0;
+volatile long txWaktuMs = 0;   // kapan txPerDetik terakhir dihitung (System.currentTimeMillis)
 
 // Discovery: IP FC dari telemetri valid terakhir (null = belum ditemukan)
 volatile InetAddress fcAddr = null;
@@ -304,6 +306,7 @@ void senderLoop() {
       long nowNs = System.nanoTime();
       if (nowNs - jendelaTxNs >= 1000000000L) {
         txPerDetik  = txHitung;
+        txWaktuMs   = System.currentTimeMillis();
         txHitung    = 0;
         jendelaTxNs = nowNs;
       }
@@ -698,11 +701,29 @@ void gambarKepala(boolean tlmAda) {
   ikonSinyal(x0 + 2.5 * u, yv + 1.6 * u, 3.2 * u, bar);
   nilaiSetelahIkon(nilaiRssi == 0 ? "--" : "-" + nilaiRssi + " dBm", x0 + 7.5 * u, yv, W_TEKS);
 
-  // LQ
+  // LQ (paket diterima FC) dan paket kendali yang benar-benar dikirim HP per detik.
+  // LQ hanya menghitung paket yang hilang di udara; angka kirim menunjukkan kalau HP sendiri
+  // mengirim kurang dari ~250/dtk. Angka kirim yang lama tidak diperbarui (sender macet) = 0.
   x0 += wc + jc;
-  label("LQ", x0 + wc / 2, yl);
+  label("LQ \u00b7 KIRIM", x0 + wc / 2, yl);
   int wLq = !tlmAda ? W_REDUP : lqFc >= 80 ? W_HIJAU : lqFc >= LQ_WARN ? W_KUNING : W_MERAH;
-  nilai(tlmAda ? lqFc + "%" : "--", x0 + wc / 2, yv, wLq);
+  int tx = System.currentTimeMillis() - txWaktuMs > 2500 ? 0 : txPerDetik;
+  String tLq = tlmAda ? lqFc + "%" : "--";
+  String tTx = tx + "/dtk";
+  textSize(3.6 * u);
+  float w1 = textWidth(tLq);
+  textSize(2.2 * u);
+  float w2 = textWidth(tTx);
+  float sela = 1.2 * u;
+  float skala = min(1, (wc - 2 * u) / (w1 + sela + w2));   // perkecil kalau chip sempit
+  float xt = x0 + (wc - (w1 + sela + w2) * skala) / 2;
+  textAlign(LEFT, CENTER);
+  fill(wLq);
+  textSize(3.6 * u * skala);
+  text(tLq, xt, yv);
+  fill(tx > 0 && tx < KIRIM_MIN ? W_KUNING : W_REDUP);
+  textSize(2.2 * u * skala);
+  text(tTx, xt + (w1 + sela) * skala, yv + 0.5 * u * skala);   // garis dasar sejajar angka LQ
 
   // Baterai
   x0 += wc + jc;

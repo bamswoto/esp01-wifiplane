@@ -84,7 +84,9 @@ Mode MANUAL:
 
 Gambar di atas dirender dari kode `draw()` yang sama; huruf di HP bisa sedikit berbeda.
 
-* Atas: status koneksi ke pesawat (alamat IP, "Mencari pesawat…" atau "Link putus"), lalu sinyal, LQ, baterai (warna hijau/kuning/merah sesuai level) dan mode kirim BC/UC.
+* Atas: status koneksi ke pesawat (alamat IP, "Mencari pesawat…" atau "Link putus"), lalu sinyal, LQ · KIRIM, baterai (warna hijau/kuning/merah sesuai level) dan mode kirim BC/UC.
+
+* LQ · KIRIM: angka besar = LQ, persen paket kendali yang diterima pesawat (dihitung FC dari nomor urut, hanya paket yang hilang di udara). Angka kecil = jumlah paket kendali yang benar-benar dikirim HP per detik, normalnya sekitar 250. Kuning kalau di bawah 200 (HP tidak sanggup mengirim secepat itu), 0 kalau HP belum atau tidak mengirim. LQ tidak membatasi gas atau motor; motor hanya dimatikan oleh failsafe (900 ms tanpa paket) dan pemutus baterai.
 
 * Di bawahnya muncul satu pesan kalau ada yang perlu diperhatikan: link putus, baterai lemah, sinyal lemah, izin kurang, atau petunjuk saat siap terbang.
 
