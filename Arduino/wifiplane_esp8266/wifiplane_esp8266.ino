@@ -1,5 +1,5 @@
 //***************************************************
-// WiFi Controlled Tiny Airplane with OTA (STA priority + AP fallback)
+// WiFi Controlled Tiny Airplane with OTA (STA priority + AP fallback, kembali ke STA saat AP tidak dipakai)
 // PROFIL JANGKAUAN MAKSIMUM (latensi boleh lebih tinggi)
 // Binding ala ELRS: CRC8 dengan nilai awal BIND_ID (integritas data sudah dijamin CRC-32 hardware WiFi)
 // Eksternal Voltage Divider: 33k & 8.2k
@@ -57,6 +57,13 @@
 // Hanya berlaku untuk kiriman FC (telemetri, OTA); rate paket kendali dipilih HP.
 #define KUNCI_RATE_KIRIM_1M 1
 
+// Lama mencoba konek STA (WiFi modem rumah / hotspot HP) sebelum jatuh ke mode AP.
+#define STA_TUNGGU_MS 8000
+// Mode AP tanpa perangkat tersambung DAN tanpa paket remote selama ini -> coba STA lagi,
+// supaya OTA tetap lewat WiFi rumah tanpa harus pindah jaringan atau menyalakan ulang.
+// Tidak pernah terjadi selama HP/PC tersambung ke AP. 0 = tidak pernah coba lagi.
+#define AP_COBA_STA_MS 60000
+
 // Mode AP: scan saat boot lalu pilih kanal 1/6/11 dengan interferensi terendah (+2-3 detik boot).
 #define AUTO_KANAL_AP    1
 #define KANAL_AP_DEFAULT 1   // dipakai jika AUTO_KANAL_AP 0 atau scan gagal
@@ -82,6 +89,7 @@ unsigned long premillis_rx   = 0;
 unsigned long premillis_batt = 0;
 unsigned long premillis_lq   = 0;
 unsigned long premillis_battLow = 0;
+unsigned long premillis_apKosong = 0;   // terakhir kali ada perangkat tersambung ke AP
 
 float batteryVoltage = 0.0;     // rata-rata bergerak, 0 = belum ada sampel
 bool  batteryLow     = false;
@@ -241,6 +249,33 @@ void playKoneksiSound(uint8_t count) {
   }
 }
 
+// --- MODE WIFI ---
+// Coba konek STA maksimal STA_TUNGGU_MS (LED berkedip). true = tersambung.
+bool cobaSTA() {
+  WiFi.mode(WIFI_STA);
+  terapkanSettingRadio();          // setelah WiFi.mode(), sebelum WiFi.begin()
+  WiFi.begin(ssid_sta, pass_sta);
+
+  unsigned long startWait = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startWait < STA_TUNGGU_MS) {
+    digitalWrite(ST_LED, LOW);
+    delay(60);
+    digitalWrite(ST_LED, HIGH);
+    delay(400);
+  }
+  return WiFi.status() == WL_CONNECTED;
+}
+
+// Jadi AP sendiri di kanalAP. Panggil setelah WiFi.disconnect().
+void mulaiAP() {
+  WiFi.mode(WIFI_AP);
+  terapkanSettingRadio();        // ulangi setelah ganti mode (kembali ke 11b)
+#if EKSP_AP_RATE_1_2M
+  hasilSupRate = wifi_set_user_sup_rate(RATE_11B1M, RATE_11B2M);
+#endif
+  WiFi.softAP(ssid_ap, pass_ap, kanalAP);
+}
+
 // --- OTA HANYA SAAT REMOTE ANDROID TIDAK TERBUKA ---
 // Remote dianggap terbuka selama paket kendali valid masih datang (aplikasi mengirim
 // 250 Hz dan berhenti 1 detik setelah ditutup/di-pause). Saat boot dihitung dari 0,
@@ -275,19 +310,7 @@ void setup() {
   // =========================================================
   // PRIORITAS 1: COBA KONEK SEBAGAI STA (WiFi modem rumah, atau hotspot HP)
   // =========================================================
-  WiFi.mode(WIFI_STA);
-  terapkanSettingRadio();          // setelah WiFi.mode(), sebelum WiFi.begin()
-  WiFi.begin(ssid_sta, pass_sta);
-
-  unsigned long startWait = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startWait < 8000) {
-    digitalWrite(ST_LED, LOW);
-    delay(60);
-    digitalWrite(ST_LED, HIGH);
-    delay(400);
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
+  if (cobaSTA()) {
     // --- STA berhasil: HP hotspot ditemukan, radio fokus penuh ke STA ---
     usingSTA = true;
     playKoneksiSound(3);   // 3 bip = mode STA aktif
@@ -304,18 +327,14 @@ void setup() {
     kanalAP = KANAL_AP_DEFAULT;
 #endif
 
-    WiFi.mode(WIFI_AP);
-    terapkanSettingRadio();        // ulangi setelah ganti mode (kembali ke 11b)
-#if EKSP_AP_RATE_1_2M
-    hasilSupRate = wifi_set_user_sup_rate(RATE_11B1M, RATE_11B2M);
-#endif
-    WiFi.softAP(ssid_ap, pass_ap, kanalAP);
+    mulaiAP();
 
     usingSTA = false;
     playKoneksiSound(2);   // 2 bip = mode AP fallback aktif
   }
 
   Udp.begin(localPort);
+  premillis_apKosong = millis();
 
 #if DEBUG_SERIAL
   Serial.printf("\nMode: %s | IP: %s | Kanal: %d | PHY: %d (1=11b, 2=11g, 3=11n)\n",
@@ -356,6 +375,37 @@ void loop() {
   // =========================================================
   aturOTA();
   if (otaAktif) ArduinoOTA.handle();
+
+  // =========================================================
+  // 0b. MODE AP TIDAK DIPAKAI -> COBA STA LAGI (OTA tetap lewat WiFi rumah)
+  //     Syarat: tidak ada perangkat tersambung ke AP DAN tidak ada paket remote
+  //     selama AP_COBA_STA_MS. AP mati selama percobaan (maks. STA_TUNGGU_MS).
+  //     Berhasil -> mode STA (3 bip). Gagal -> kembali jadi AP tanpa bunyi.
+  // =========================================================
+#if AP_COBA_STA_MS > 0
+  if (!usingSTA) {
+    if (WiFi.softAPgetStationNum() > 0) {
+      premillis_apKosong = millis();
+    } else if (millis() - premillis_apKosong >= AP_COBA_STA_MS &&
+               millis() - premillis_rx >= AP_COBA_STA_MS) {
+      if (otaAktif) {             // OTA & mDNS dimulai ulang oleh aturOTA() di mode baru
+        ArduinoOTA.end();
+        otaAktif = false;
+      }
+      if (cobaSTA()) {
+        usingSTA = true;
+        playKoneksiSound(3);
+      } else {
+        WiFi.disconnect();
+        delay(100);
+        mulaiAP();                // kanal yang sama, tanpa scan ulang
+      }
+      Udp.stop();
+      Udp.begin(localPort);
+      premillis_apKosong = millis();
+    }
+  }
+#endif
   // =========================================================
   // 1. TERIMA PAKET UDP DENGAN VALIDASI CRC8 ALA ELRS
   //    Antrean dikuras tiap loop; hanya paket valid TERBARU yang dipakai.

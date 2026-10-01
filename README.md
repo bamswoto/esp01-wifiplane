@@ -26,7 +26,7 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 * OTA updates (Arduino IDE port `wifiplane-ota`, asks for `OTA_PASSWORD`) work in both modes, but only while the remote app isn't open: OTA and mDNS start after 10 s without control packets (`OTA_TUNDA_MS`) and stop as soon as the app sends again, so they never run during a flight. After power up without the app, wait about 10 s before uploading.
 
-* The mode is picked once at power up and kept until the plane is switched off.
+* The mode is picked at power up. In access point mode, when nothing is connected to it and the app hasn't sent anything for 60 s (`AP_COBA_STA_MS`), the plane tries `ssid_sta` again for up to 8 s and stays there if it connects (3 beeps), so OTA keeps going through the home WiFi without switching networks. While a phone or PC is connected to the access point it never leaves it.
 
 **Range settings (firmware)**
 
