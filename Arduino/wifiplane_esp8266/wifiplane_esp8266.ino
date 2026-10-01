@@ -1,7 +1,7 @@
 //***************************************************
 // WiFi Controlled Tiny Airplane with OTA (STA priority + AP fallback)
 // PROFIL JANGKAUAN MAKSIMUM (latensi boleh lebih tinggi)
-// Optimized with ELRS-style Packet Integrity (CRC8, nilai awal = BIND_ID)
+// Binding ala ELRS: CRC8 dengan nilai awal BIND_ID (integritas data sudah dijamin CRC-32 hardware WiFi)
 // Eksternal Voltage Divider: 33k & 8.2k
 // Auto Cut-Off Motor saat Baterai < 3.0V selama 2 detik (latch; re-arm saat perintah HP = 0)
 // Discovery: telemetri di-broadcast selama belum ada HP yang mengontrol,
@@ -12,7 +12,6 @@
 
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
-#include <ESP8266mDNS.h>
 #include <ArduinoOTA.h>
 
 #define P_ID 1
@@ -78,9 +77,6 @@
 // Catatan: datasheet ESP8266EX: tegangan operasi 2.5-3.6 V. Dengan LDO/buck dari 1S,
 // rail ESP <= tegangan baterai, jadi di dekat ambang ini ESP bisa reset lebih dulu.
 
-unsigned int pwmKanan = 0;
-unsigned int pwmKiri  = 0;
-
 unsigned long premillis_rssi = 0;
 unsigned long premillis_rx   = 0;
 unsigned long premillis_batt = 0;
@@ -93,7 +89,7 @@ bool  battDiBawahMin = false;   // tegangan sedang di bawah BATT_MIN_V (belum te
 bool  cmdNol         = true;    // true = perintah terakhir dari HP adalah 0/0
 
 // --- Link quality ala ELRS: % paket diterima dari nomor urut yang diharapkan, per detik ---
-bool     linked       = false;  // ada paket valid dalam DC_RX terakhir
+bool     linked       = false;  // ada paket valid dalam DC_RX terakhir (false = failsafe)
 uint16_t lastSeq      = 0;
 uint16_t lqDiterima   = 0;
 uint16_t lqDiharapkan = 0;
@@ -102,7 +98,6 @@ uint8_t  lqPersen     = 0;
 // --- Variabel baru untuk non-blocking ---
 unsigned long lastBlink      = 0;
 bool          ledState       = false;
-bool          failsafeActive = false;
 
 // --- Status mode WiFi yang sedang aktif ---
 bool    usingSTA = true;   // true = konek ke hotspot HP, false = jadi AP sendiri
@@ -116,7 +111,6 @@ bool otaAktif = false;   // ArduinoOTA.begin() sudah dipanggil (end() crash jika
 
 // --- IP HP yang sedang mengontrol (tujuan telemetri unicast) ---
 IPAddress ipHP;
-bool      adaIpHP = false;
 
 // --- KONFIGURASI WIFI (isi sendiri, jangan di-commit ke repo publik) ---
 const char* ssid_sta = "NAMA_WIFI_STA";        // WiFi modem rumah (untuk OTA) atau hotspot HP
@@ -397,24 +391,10 @@ void loop() {
   }
 
   if (adaPaketBaru) {
-    digitalWrite(ST_LED, LOW);
-
     cmdNol = (cmdKanan == 0 && cmdKiri == 0);
-
-    if (batteryLow) {
-      pwmKanan = 0;
-      pwmKiri  = 0;
-    } else {
-      pwmKanan = cmdKanan;
-      pwmKiri  = cmdKiri;
-    }
-    analogWrite(MOTOR_KANAN, pwmKanan);
-    analogWrite(MOTOR_KIRI, pwmKiri);
-
-    adaIpHP        = true;
-    premillis_rx   = millis();
-    failsafeActive = false;
-    digitalWrite(ST_LED, HIGH);
+    analogWrite(MOTOR_KANAN, batteryLow ? 0 : cmdKanan);
+    analogWrite(MOTOR_KIRI,  batteryLow ? 0 : cmdKiri);
+    premillis_rx = millis();
   }
 
   // Jendela link quality 1 detik
@@ -451,10 +431,8 @@ void loop() {
     }
 
     if (batteryLow) {
-      analogWrite(MOTOR_KANAN, 0);
+      analogWrite(MOTOR_KANAN, 0);   // langsung, tanpa menunggu paket berikutnya
       analogWrite(MOTOR_KIRI, 0);
-      pwmKanan = 0;
-      pwmKiri  = 0;
     }
   }
 
@@ -479,7 +457,7 @@ void loop() {
     replyBuffer[4] = calculateCRC8(replyBuffer, 4);
 
     IPAddress replyIp;
-    if (adaIpHP && (millis() - premillis_rx <= DC_RX)) {
+    if (millis() - premillis_rx <= DC_RX) {
       replyIp = ipHP;
     } else if (usingSTA) {
       replyIp = IPAddress(255, 255, 255, 255);
@@ -496,9 +474,8 @@ void loop() {
   // =========================================================
   // 4. FAIL-SAFE MOTOR
   // =========================================================
-  if (millis() - premillis_rx > DC_RX && !failsafeActive) {
-    failsafeActive = true;
-    linked         = false;   // paket berikutnya diterima berapa pun nomor urutnya
+  if (linked && millis() - premillis_rx > DC_RX) {
+    linked = false;   // paket berikutnya diterima berapa pun nomor urutnya
     analogWrite(MOTOR_KANAN, 0);
     analogWrite(MOTOR_KIRI, 0);
   }

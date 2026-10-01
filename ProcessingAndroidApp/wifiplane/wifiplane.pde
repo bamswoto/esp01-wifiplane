@@ -2,7 +2,8 @@
 // WiFi Controlled Tiny Airplane - Android Controller
 // PROFIL JANGKAUAN MAKSIMUM (latensi boleh lebih tinggi)
 // Background sender thread (~250 Hz) + buffer reuse
-// ELRS-style Packet Integrity (CRC8, nilai awal = BIND_ID) + nomor urut 16-bit
+// Binding ala ELRS: CRC8 dengan nilai awal BIND_ID (integritas data sudah dijamin CRC-32 hardware WiFi)
+// + nomor urut 16-bit
 // Paket kendali (6 byte): [0xEA, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI, CRC8]
 // Discovery: IP FC diambil dari telemetri valid
 // Mode kirim otomatis (ditampilkan di area kanan-tengah):
@@ -28,7 +29,6 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
 import android.net.wifi.WifiManager;
-import android.os.PowerManager;
 import android.view.WindowManager;
 import java.net.InetAddress;
 import java.net.Inet4Address;
@@ -76,9 +76,9 @@ volatile int vcc           = 0;
 volatile int lqFc          = 0;   // LQ % yang dihitung FC dari nomor urut paket
 volatile long lastTelemetryMs = -100000;
 
-// RSSI yang diukur HP sendiri (dipakai saat FC mode AP, yang mengirim RSSI 0)
-int  rssiHp     = 0;
-long lastRssiHp = 0;
+// Wi-Fi klien HP, dibaca sekali per detik oleh sender thread (bacaInfoWifiKlien)
+volatile InetAddress ipKlienHp = null;   // null = HP bukan klien Wi-Fi (mis. HP jadi hotspot)
+volatile int rssiHp = 0;                 // RSSI yang diukur HP, dipakai saat FC mode AP (FC kirim 0)
 
 // Paket terkirim/detik dari HP (ditulis sender thread)
 volatile int txPerDetik = 0;
@@ -117,7 +117,6 @@ KetaiVibrate vibe;
 // --- Locks ---
 WifiManager wifiMgr;
 WifiManager.WifiLock wifiLock;
-PowerManager.WakeLock wakeLock;
 WifiManager.MulticastLock multicastLock;
 
 // =========================================================
@@ -168,14 +167,10 @@ void senderLoop() {
   DatagramPacket pkt = new DatagramPacket(buf, buf.length);
   pkt.setPort(remotPort);
 
-  InetAddress fallbackAddr = null;
-  long nextFallbackMs = 0;
-
-  InetAddress fcUntukBc = null;   // IP FC yang broadcast-nya sudah dihitung
-  InetAddress bcFc      = null;   // alamat broadcast subnet FC
-
-  InetAddress fcUntukMode = null; // IP FC yang mode kirimnya sudah dipilih
-  long nextModeMs = 0;            // pilih ulang tiap detik (jaringan HP bisa berubah)
+  InetAddress fallbackAddr = null; // broadcast subnet Wi-Fi klien HP, sebelum FC ditemukan
+  InetAddress fcUntukMode  = null; // IP FC yang mode kirimnya sudah dipilih
+  InetAddress bcFc         = null; // alamat broadcast subnet FC
+  long nextInfoMs = 0;             // info Wi-Fi & mode kirim dibaca ulang tiap detik
 
   int  seq         = 0;           // nomor urut 16-bit, naik tiap paket terkirim
   int  txHitung    = 0;
@@ -197,36 +192,34 @@ void senderLoop() {
         sockGen = gen;
       }
 
+      // --- Info Wi-Fi klien HP, sekali per detik (jaringan HP bisa berubah) ---
+      long nowMs = System.currentTimeMillis();
+      boolean infoBaru = nowMs >= nextInfoMs;
+      if (infoBaru) {
+        bacaInfoWifiKlien();
+        nextInfoMs = nowMs + 1000;
+      }
+
       // --- Tentukan tujuan ---
       InetAddress fa = fcAddr;
       InetAddress target;
       if (fa != null) {
-        long nowModeMs = System.currentTimeMillis();
-        if (!fa.equals(fcUntukMode) || nowModeMs >= nextModeMs) {
+        if (infoBaru || !fa.equals(fcUntukMode)) {
           kirimBroadcast = pakaiBroadcast(fa);
+          bcFc = kirimBroadcast ? broadcastUntuk(fa) : null;
           fcUntukMode = fa;
-          nextModeMs = nowModeMs + 1000;
         }
-        if (kirimBroadcast) {
-          if (!fa.equals(fcUntukBc)) {
-            bcFc = broadcastUntuk(fa);
-            fcUntukBc = fa;
-          }
-          target = bcFc;
-        } else {
-          target = fa;
-        }
+        target = kirimBroadcast ? bcFc : fa;
       } else {
-        long nowMs = System.currentTimeMillis();
-        if (nowMs >= nextFallbackMs) {
-          fallbackAddr = getWifiBroadcastAddr();
-          nextFallbackMs = nowMs + 1000;
-        }
+        // FC mode AP: broadcast ke subnet Wi-Fi klien HP. HP jadi hotspot: tidak kirim,
+        // tunggu telemetri broadcast dari FC
+        InetAddress ipHp = ipKlienHp;
+        if (infoBaru) fallbackAddr = (ipHp != null) ? broadcastUntuk(ipHp) : null;
         target = fallbackAddr;
       }
 
       // Setelah app ter-pause: kirim 0/0 sebentar (motor langsung mati), lalu berhenti
-      boolean kirim = appAktif || System.currentTimeMillis() - pauseMs < KIRIM_SETELAH_PAUSE_MS;
+      boolean kirim = appAktif || nowMs - pauseMs < KIRIM_SETELAH_PAUSE_MS;
 
       if (target != null && kirim) {
         // --- Snapshot state (volatile read) lalu susun paket 6 byte ---
@@ -328,61 +321,50 @@ DatagramSocket buatSocketKirim() throws Exception {
 // HP klien Wi-Fi (FC mode AP, atau HP & FC sama-sama di router rumah) -> UC: kiriman klien
 //   tetap di-ACK dan diulang, broadcast tidak memberi keuntungan, bisa diteruskan ulang oleh
 //   AP ke semua klien dan (di router) ditahan sampai beacon DTIM.
-// Caranya: FC satu subnet dengan Wi-Fi klien HP -> UC, selain itu FC ada di hotspot HP -> BC.
+// Caranya: FC dicapai lewat interface Wi-Fi klien HP -> UC, selain itu FC ada di hotspot HP -> BC.
 // =========================================================
 boolean pakaiBroadcast(InetAddress fc) {
-  byte[] f = fc.getAddress();
-  int ip = 0;
-  try {
-    if (wifiMgr != null) ip = wifiMgr.getConnectionInfo().getIpAddress();   // 0 = HP bukan klien Wi-Fi
-  }
-  catch (Exception e) {
-  }
-  if (ip == 0 || f.length != 4) return true;
-  byte[] hp = {(byte) ip, (byte) (ip >> 8), (byte) (ip >> 16), (byte) (ip >> 24)};   // little-endian
-
-  int prefix = 24;   // subnet hotspot Android, softAP ESP dan kebanyakan router rumah
-  try {
-    for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
-      for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
-        if (java.util.Arrays.equals(ia.getAddress().getAddress(), hp)) prefix = ia.getNetworkPrefixLength();
-      }
-    }
-  }
-  catch (Exception e) {
-    // pakai asumsi /24
-  }
-  return !samaSubnet(hp, f, prefix);
+  InetAddress ipHp = ipKlienHp;
+  if (ipHp == null) return true;                       // HP bukan klien Wi-Fi
+  InterfaceAddress ia = interfaceUntuk(fc);
+  if (ia != null) return !ia.getAddress().equals(ipHp);
+  return !samaSubnet(ipHp.getAddress(), fc.getAddress(), 24);   // interface tidak terbaca: asumsi /24
 }
 
 // =========================================================
-// ALAMAT BROADCAST SUBNET FC
-// Dicari dari interface lokal yang subnetnya memuat IP FC (hotspot atau Wi-Fi klien).
+// ALAMAT BROADCAST SUBNET (FC, atau Wi-Fi klien HP sebelum FC ditemukan)
+// Dari interface lokal yang subnetnya memuat alamat itu.
 // Jika gagal, asumsi /24 (subnet hotspot Android dan softAP ESP sama-sama /24).
 // =========================================================
-InetAddress broadcastUntuk(InetAddress fc) {
-  byte[] f = fc.getAddress();
-  if (f.length != 4) return fc;
+InetAddress broadcastUntuk(InetAddress addr) {
+  InterfaceAddress ia = interfaceUntuk(addr);
+  if (ia != null && ia.getBroadcast() != null) return ia.getBroadcast();
+  byte[] f = addr.getAddress();
+  if (f.length != 4) return addr;
+  try {
+    return InetAddress.getByAddress(new byte[] {f[0], f[1], f[2], (byte) 255});
+  }
+  catch (Exception e) {
+    return addr;
+  }
+}
+
+// Interface IPv4 lokal (aktif, bukan loopback) yang subnetnya memuat addr, null kalau tidak ada
+InterfaceAddress interfaceUntuk(InetAddress addr) {
+  byte[] f = addr.getAddress();
+  if (f.length != 4) return null;
   try {
     for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
       if (!ni.isUp() || ni.isLoopback()) continue;
       for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
         InetAddress a = ia.getAddress();
-        InetAddress b = ia.getBroadcast();
-        if (!(a instanceof Inet4Address) || b == null) continue;
-        if (samaSubnet(a.getAddress(), f, ia.getNetworkPrefixLength())) return b;
+        if (a instanceof Inet4Address && samaSubnet(a.getAddress(), f, ia.getNetworkPrefixLength())) return ia;
       }
     }
   }
   catch (Exception e) {
-    // lanjut ke asumsi /24
   }
-  try {
-    return InetAddress.getByAddress(new byte[] {f[0], f[1], f[2], (byte) 255});
-  }
-  catch (Exception e) {
-    return fc;
-  }
+  return null;
 }
 
 boolean samaSubnet(byte[] a, byte[] b, int prefix) {
@@ -442,10 +424,6 @@ void draw() {
   text(hold ? "HOLD ON" : "HOLD", 3*width/4 + width/8, 3*height/4 + height/16);
 
   // RSSI: dari FC (mode STA), atau diukur HP sendiri saat FC mode AP (FC kirim 0)
-  if (millis() - lastRssiHp > 500) {
-    lastRssiHp = millis();
-    rssiHp = bacaRssiHp();
-  }
   boolean tlmAda = millis() - lastTelemetryMs <= TLM_HILANG_MS;
 
   textSize(height/14);
@@ -593,43 +571,33 @@ void receive(byte[] data, String ip, int port) {
 }
 
 // =========================================================
-// BROADCAST FALLBACK (hanya dipakai sebelum IP FC ditemukan)
-// DhcpInfo berisi DHCP koneksi Wi-Fi KLIEN HP, bukan subnet hotspot.
-// Return null kalau HP bukan klien Wi-Fi (mis. HP sedang jadi hotspot).
+// INFO Wi-Fi KLIEN HP (IP & RSSI), satu pembacaan untuk mode kirim, broadcast
+// sebelum FC ditemukan, dan RSSI di layar. IP 0 = HP bukan klien Wi-Fi.
 // =========================================================
-InetAddress getWifiBroadcastAddr() {
+void bacaInfoWifiKlien() {
+  int ip = 0, r = 0;
   try {
-    if (wifiMgr == null) return null;
-    android.net.DhcpInfo dhcp = wifiMgr.getDhcpInfo();   // butuh ACCESS_WIFI_STATE
-
-    if (dhcp != null && dhcp.gateway != 0) {
-      int broadcast = (dhcp.gateway & dhcp.netmask) | ~dhcp.netmask;
-      byte[] quads = new byte[4];
-      for (int k = 0; k < 4; k++)
-        quads[k] = (byte) ((broadcast >> (k * 8)) & 0xFF);
-
-      return InetAddress.getByAddress(quads);
+    if (wifiMgr != null) {
+      android.net.wifi.WifiInfo info = wifiMgr.getConnectionInfo();   // butuh ACCESS_WIFI_STATE
+      ip = info.getIpAddress();
+      r  = info.getRssi();
     }
   }
   catch (SecurityException se) {
     tambahPeringatan("ACCESS_WIFI_STATE");
   }
   catch (Exception e) {
-    // abaikan; tunggu discovery dari telemetri FC
   }
-  return null;
-}
-
-// RSSI AP yang diukur HP (HP sebagai klien Wi-Fi), 0 kalau tidak ada
-int bacaRssiHp() {
-  try {
-    if (wifiMgr == null) return 0;
-    int r = wifiMgr.getConnectionInfo().getRssi();   // butuh ACCESS_WIFI_STATE
-    if (r < 0 && r > -127) return -r;
+  InetAddress a = null;
+  if (ip != 0) {
+    try {
+      a = InetAddress.getByAddress(new byte[] {(byte) ip, (byte) (ip >> 8), (byte) (ip >> 16), (byte) (ip >> 24)});   // little-endian
+    }
+    catch (Exception e) {
+    }
   }
-  catch (Exception e) {
-  }
-  return 0;
+  ipKlienHp = a;
+  rssiHp    = (a != null && r < 0 && r > -127) ? -r : 0;
 }
 
 // =========================================================
@@ -727,15 +695,7 @@ void setupPowerAndWifiLocks() {
   catch (Exception e) {
     println("Gagal membuat WifiLock/MulticastLock: " + e.getMessage());
   }
-  try {
-    // 3. Cegah CPU tidur
-    PowerManager powerManager = (PowerManager) app.getSystemService(Context.POWER_SERVICE);
-    wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "wifiplane:RC_WakeLock");
-    wakeLock.setReferenceCounted(false);
-  }
-  catch (Exception e) {
-    println("Gagal membuat WakeLock: " + e.getMessage());
-  }
+  // Tanpa WakeLock: layar dijaga menyala selama app tampil, jadi CPU tidak tidur
   ambilLocks();
 }
 
@@ -752,19 +712,12 @@ void ambilLocks() {
   catch (SecurityException e) {
     tambahPeringatan("CHANGE_WIFI_MULTICAST_STATE");
   }
-  try {
-    if (wakeLock != null) wakeLock.acquire();
-  }
-  catch (SecurityException e) {
-    tambahPeringatan("WAKE_LOCK");
-  }
 }
 
 void lepasLocks() {
   try {
     if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
     if (wifiLock      != null && wifiLock.isHeld())      wifiLock.release();
-    if (wakeLock      != null && wakeLock.isHeld())      wakeLock.release();
   }
   catch (Exception e) {
   }
@@ -781,7 +734,7 @@ void tambahPeringatan(String izin) {
 void onPause() {
   // App ter-pause (panggilan masuk, layar mati, pindah app): kunci kendali.
   // Sender thread mengirim 0/0 selama KIRIM_SETELAH_PAUSE_MS -> motor langsung mati,
-  // tanpa menunggu failsafe FC, lalu berhenti mengirim. Lock dilepas supaya
+  // tanpa menunggu failsafe FC, lalu berhenti mengirim. Lock Wi-Fi dilepas supaya
   // baterai HP tidak terkuras di background. Setelah kembali, tekan ACTIVATED lagi.
   gas      = 0;
   hold     = false;
