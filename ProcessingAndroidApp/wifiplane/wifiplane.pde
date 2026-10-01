@@ -2,9 +2,9 @@
 // WiFi Controlled Tiny Airplane - Android Controller
 // PROFIL JANGKAUAN MAKSIMUM (latensi boleh lebih tinggi)
 // Background sender thread (~250 Hz) + buffer reuse
-// Binding ala ELRS: CRC8 dengan nilai awal BIND_ID (integritas data sudah dijamin CRC-32 hardware WiFi)
+// Binding ala ELRS: byte pertama setiap paket = BIND_ID (integritas data sudah dijamin CRC-32 hardware WiFi)
 // + nomor urut 16-bit
-// Paket kendali (6 byte): [0xEA, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI, CRC8]
+// Paket kendali (5 byte): [BIND_ID, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI]
 // Discovery: IP FC diambil dari telemetri valid
 // Mode kirim otomatis (ditampilkan di area kanan-tengah):
 //   BC = broadcast ke subnet FC, saat HP jadi hotspot (FC mode STA): frame grup, tanpa retry MAC.
@@ -16,7 +16,7 @@
 // Jaringan Wi-Fi tanpa internet (AP FC) di-request agar tidak dilepas sistem,
 // dan socket kirim di-bind ke jaringan itu (tetap jalan walau data seluler ON)
 // Izin (Android > Sketch Permissions): INTERNET, VIBRATE, WAKE_LOCK, ACCESS_WIFI_STATE,
-//   CHANGE_WIFI_MULTICAST_STATE, ACCESS_NETWORK_STATE, CHANGE_NETWORK_STATE
+//   ACCESS_NETWORK_STATE, CHANGE_NETWORK_STATE
 //   Izin yang kurang ditampilkan di layar.
 //***************************************************
 
@@ -39,7 +39,7 @@ import java.net.DatagramPacket;
 import java.util.Collections;
 
 // =========================================================
-// BINDING: nilai awal CRC8, HARUS sama dengan BIND_ID di firmware FC
+// BINDING: byte pertama setiap paket, HARUS sama dengan BIND_ID di firmware FC
 // =========================================================
 final int BIND_ID = 0x5A;
 
@@ -117,7 +117,6 @@ KetaiVibrate vibe;
 // --- Locks ---
 WifiManager wifiMgr;
 WifiManager.WifiLock wifiLock;
-WifiManager.MulticastLock multicastLock;
 
 // =========================================================
 // SETUP
@@ -163,7 +162,7 @@ void senderLoop() {
   int sockGen = -1;
 
   // Buffer & packet di-reuse (nol alokasi per iterasi)
-  final byte[] buf = new byte[6];
+  final byte[] buf = new byte[5];
   DatagramPacket pkt = new DatagramPacket(buf, buf.length);
   pkt.setPort(remotPort);
 
@@ -222,7 +221,7 @@ void senderLoop() {
       boolean kirim = appAktif || nowMs - pauseMs < KIRIM_SETELAH_PAUSE_MS;
 
       if (target != null && kirim) {
-        // --- Snapshot state (volatile read) lalu susun paket 6 byte ---
+        // --- Snapshot state (volatile read) lalu susun paket 5 byte ---
         isiPaket(buf, seq, gas, trimKiri, trimKanan, accelerometerX, diff_power, lock);
 
         // --- Kirim (buffer yang sama, packet yang sama) ---
@@ -268,7 +267,7 @@ void senderLoop() {
 }
 
 // =========================================================
-// PAKET KENDALI (6 byte): [0xEA, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI, CRC8]
+// PAKET KENDALI (5 byte): [BIND_ID, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI]
 // LOCK atau gas 0 = kedua motor 0 (kemiringan HP dan trim tidak memutar motor)
 // =========================================================
 void isiPaket(byte[] buf, int seq, int g, int tKiri, int tKanan, float ax, float dp, int lk) {
@@ -280,7 +279,7 @@ void isiPaket(byte[] buf, int seq, int g, int tKiri, int tKanan, float ax, float
   int pwmKanan = constrain(kanan * 2, 0, 255);
   int pwmKiri  = constrain(kiri * 2, 0, 255);
 
-  buf[0] = (byte) 0xEA;   // Header
+  buf[0] = (byte) BIND_ID;
   buf[1] = (byte) (seq & 0xFF);
   buf[2] = (byte) ((seq >> 8) & 0xFF);
   if (lk == 1 && g > 0) {
@@ -290,7 +289,6 @@ void isiPaket(byte[] buf, int seq, int g, int tKiri, int tKanan, float ax, float
     buf[3] = (byte) 0x00;
     buf[4] = (byte) 0x00;
   }
-  buf[5] = calculateCRC8(buf, 5);
 }
 
 // =========================================================
@@ -435,7 +433,6 @@ void draw() {
 
   fill(0);
   textSize(height/30);
-  textAlign(CENTER, CENTER);
   text("Instructables", width/2, height/20);
   text("WiFi Plane App", width/2, 2*height/20);
   text("By Ravi Butani", width/2, 3*height/20);
@@ -469,24 +466,6 @@ void draw() {
     vcc  = 0;
     lqFc = 0;
   }
-}
-
-// =========================================================
-// CRC8 (identik dengan sisi ESP8266, nilai awal = BIND_ID)
-// =========================================================
-byte calculateCRC8(byte[] data, int length) {
-  int crc = BIND_ID & 0xFF;
-  for (int i = 0; i < length; i++) {
-    crc ^= (data[i] & 0xFF);
-    for (int j = 0; j < 8; j++) {
-      if ((crc & 0x80) != 0) {
-        crc = ((crc << 1) ^ 0x07) & 0xFF;
-      } else {
-        crc = (crc << 1) & 0xFF;
-      }
-    }
-  }
-  return (byte) (crc & 0xFF);
 }
 
 // =========================================================
@@ -547,16 +526,15 @@ void mouseReleased() {
 
 // =========================================================
 // RECEIVE TELEMETRI dari FC (hypermedia UDP callback)
-// Format: [RSSI, VBAT*10, LQ %, CRC8]. Paket valid juga dipakai untuk
+// Format: [BIND_ID, RSSI, VBAT*10, LQ %]. Paket valid juga dipakai untuk
 // discovery: IP pengirimnya = IP FC.
 // =========================================================
 void receive(byte[] data, String ip, int port) {
-  if (data.length != 4) return;
-  if (calculateCRC8(data, 3) != data[3]) return;
+  if (data.length != 4 || data[0] != (byte) BIND_ID) return;   // pesawat lain / paket nyasar
 
-  rssi = data[0] & 0xFF;
-  vcc  = data[1] & 0xFF;
-  lqFc = data[2] & 0xFF;
+  rssi = data[1] & 0xFF;
+  vcc  = data[2] & 0xFF;
+  lqFc = data[3] & 0xFF;
   lastTelemetryMs = millis();
 
   try {
@@ -664,9 +642,8 @@ void evaluasiJaringanWifi(Network n, NetworkCapabilities c) {
 }
 
 // =========================================================
-// LAYAR & LOCKS
-// Lock dipegang hanya selama app tampil (dilepas di onPause, diambil lagi di onResume).
-// Tiap lock di try sendiri: satu izin kurang tidak membatalkan lock lain.
+// LAYAR & WIFI LOCK
+// WifiLock dipegang hanya selama app tampil (dilepas di onPause, diambil lagi di onResume).
 // =========================================================
 void keepScreenOn() {
   // Layar mati = onPause = kendali terkunci di udara
@@ -682,18 +659,15 @@ void setupPowerAndWifiLocks() {
   try {
     wifiMgr = (WifiManager) app.getSystemService(Context.WIFI_SERVICE);
 
-    // 1. Wi-Fi tanpa power save: WIFI_MODE_FULL_LOW_LATENCY (4) di Android 10+,
+    // Wi-Fi tanpa power save: WIFI_MODE_FULL_LOW_LATENCY (4) di Android 10+,
     //    WIFI_MODE_FULL_HIGH_PERF (3) sebelumnya. Hanya berpengaruh saat HP klien Wi-Fi.
     wifiLock = wifiMgr.createWifiLock(android.os.Build.VERSION.SDK_INT >= 29 ? 4 : 3, "RC_WifiLock");
     wifiLock.setReferenceCounted(false);
-
-    // 2. Buka blokir broadcast/multicast UDP (telemetri broadcast FC mode AP)
-    multicastLock = wifiMgr.createMulticastLock("RC_MulticastLock");
-    multicastLock.setReferenceCounted(false);
   }
   catch (Exception e) {
-    println("Gagal membuat WifiLock/MulticastLock: " + e.getMessage());
+    println("Gagal membuat WifiLock: " + e.getMessage());
   }
+  // Tanpa MulticastLock: aplikasi selalu mengirim duluan dan FC membalas unicast
   // Tanpa WakeLock: layar dijaga menyala selama app tampil, jadi CPU tidak tidur
   ambilLocks();
 }
@@ -705,18 +679,11 @@ void ambilLocks() {
   catch (SecurityException e) {
     tambahPeringatan("WAKE_LOCK");
   }
-  try {
-    if (multicastLock != null) multicastLock.acquire();
-  }
-  catch (SecurityException e) {
-    tambahPeringatan("CHANGE_WIFI_MULTICAST_STATE");
-  }
 }
 
 void lepasLocks() {
   try {
-    if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
-    if (wifiLock      != null && wifiLock.isHeld())      wifiLock.release();
+    if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
   }
   catch (Exception e) {
   }

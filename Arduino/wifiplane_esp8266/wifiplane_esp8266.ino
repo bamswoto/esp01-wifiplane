@@ -1,13 +1,13 @@
 //***************************************************
 // WiFi Controlled Tiny Airplane with OTA (STA priority + AP fallback + rollback + mode aman)
 // PROFIL JANGKAUAN MAKSIMUM (latensi boleh lebih tinggi)
-// Binding ala ELRS: CRC8 dengan nilai awal BIND_ID (integritas data sudah dijamin CRC-32 hardware WiFi)
+// Binding ala ELRS: byte pertama setiap paket = BIND_ID (integritas data sudah dijamin CRC-32 hardware WiFi)
 // Eksternal Voltage Divider: 33k & 8.2k
 // Auto Cut-Off Motor saat Baterai < 3.0V selama 2 detik (latch; re-arm saat perintah HP = 0)
 // Discovery: telemetri di-broadcast selama belum ada HP yang mengontrol,
 //            setelah itu unicast ke IP HP pengirim paket valid
-// Paket kendali (6 byte): [0xEA, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI, CRC8]
-// Telemetri (4 byte): [RSSI, VBAT*10, LQ %, CRC8]
+// Paket kendali (5 byte): [BIND_ID, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI]
+// Telemetri (4 byte): [BIND_ID, RSSI, VBAT*10, LQ %]
 //***************************************************
 
 #include <ESP8266WiFi.h>
@@ -30,9 +30,9 @@
 #define DEBUG_SERIAL 0
 
 // --- BINDING ---
-// Nilai awal CRC8. HARUS sama dengan BIND_ID di aplikasi Android.
-// Ganti di KEDUA sisi supaya HP/pesawat lain yang memakai aplikasi yang sama
-// tidak saling mengendalikan.
+// Byte pertama setiap paket (kendali dan telemetri). HARUS sama dengan BIND_ID di
+// aplikasi Android. Paket dengan BIND_ID lain dibuang. Ganti di KEDUA sisi supaya
+// HP/pesawat lain yang memakai aplikasi yang sama tidak saling mengendalikan.
 #define BIND_ID 0x5A
 
 // --- OTA ---
@@ -155,8 +155,8 @@ const char* pass_ap  = "PASSWORD_AP_FC";   // minimal 8 karakter
 unsigned int localPort = 6000;
 unsigned int remotPort = 2390;
 
-uint8_t packetBuffer[6];    // paket kendali 6 byte
-uint8_t replyBuffer[4];   // telemetri: [RSSI, VBAT*10, LQ %, CRC8]
+uint8_t packetBuffer[5];    // paket kendali 5 byte
+uint8_t replyBuffer[4];     // telemetri: [BIND_ID, RSSI, VBAT*10, LQ %]
 WiFiUDP Udp;
 
 #if RF_KALIBRASI_PENUH
@@ -166,21 +166,11 @@ RF_PRE_INIT() {
 }
 #endif
 
-// --- FUNGSI VALIDASI CRC8 (SAMA DENGAN SISI ANDROID) ---
-// Nilai awal = BIND_ID (lihat bagian BINDING)
-uint8_t calculateCRC8(const uint8_t *data, uint8_t len) {
-  uint8_t crc = BIND_ID;
-  for (uint8_t i = 0; i < len; i++) {
-    crc ^= data[i];
-    for (uint8_t j = 0; j < 8; j++) {
-      if (crc & 0x80) {
-        crc = (crc << 1) ^ 0x07;
-      } else {
-        crc <<= 1;
-      }
-    }
-  }
-  return crc;
+// --- REMOTE ANDROID TERBUKA ---
+// Selama paket kendali valid masih datang (aplikasi mengirim 250 Hz dan berhenti
+// 1 detik setelah ditutup/di-pause). Saat boot dihitung dari 0.
+bool remoteTerbuka() {
+  return millis() - premillis_rx < OTA_TUNDA_MS;
 }
 
 // --- FUNGSI BACA TEGANGAN BATERAI (1 SAMPEL; dirata-rata antar panggilan) ---
@@ -309,7 +299,7 @@ String md5VersiBaik() {
 // Dipanggil tiap loop(): salin firmware yang sedang jalan ke FS, 1 KB per loop.
 void simpanVersiBaik() {
   if (simpanSelesai || millis() < VERSI_BAIK_MS) return;
-  if (millis() - premillis_rx < OTA_TUNDA_MS || batteryLow) {
+  if (remoteTerbuka() || batteryLow) {
     if (fileSimpan) {             // remote dibuka saat menyalin: batalkan, ulang nanti
       fileSimpan.close();
       LittleFS.remove(FILE_VERSI_TMP);
@@ -446,12 +436,9 @@ void jalankanModeAman() {
 }
 
 // --- OTA HANYA SAAT REMOTE ANDROID TIDAK TERBUKA (MODE STA, ATAU AP SEBAGAI CADANGAN) ---
-// Remote dianggap terbuka selama paket kendali valid masih datang (aplikasi mengirim
-// 250 Hz dan berhenti 1 detik setelah ditutup/di-pause). Saat boot dihitung dari 0,
-// jadi tanpa remote OTA aktif ~OTA_TUNDA_MS setelah pesawat dinyalakan.
+// Tanpa remote, OTA aktif ~OTA_TUNDA_MS setelah pesawat dinyalakan.
 void aturOTA() {
-  bool remoteTerbuka = (millis() - premillis_rx < OTA_TUNDA_MS);
-  bool otaBoleh      = !remoteTerbuka;
+  bool otaBoleh = !remoteTerbuka();
   if (!otaBoleh && otaAktif) {
     ArduinoOTA.end();     // tutup listener OTA dan mDNS
     otaAktif = false;
@@ -544,7 +531,7 @@ void loop() {
   // Simpan versi ini sebagai versi baik untuk rollback (saat remote tertutup)
   simpanVersiBaik();
   // =========================================================
-  // 1. TERIMA PAKET UDP DENGAN VALIDASI CRC8 ALA ELRS
+  // 1. TERIMA PAKET UDP DENGAN BIND_ID ALA ELRS
   //    Antrean dikuras tiap loop; hanya paket valid TERBARU yang dipakai.
   //    Nomor urut 16-bit: paket basi/duplikat dibuang, celah nomor = paket hilang (LQ).
   //    16-bit supaya putus > 0.5 detik di 250 Hz tidak terbaca sebagai paket basi.
@@ -556,11 +543,10 @@ void loop() {
   for (uint8_t n = 0; n < MAX_PAKET_PER_LOOP; n++) {
     int packetSize = Udp.parsePacket();   // juga melepas paket sebelumnya
     if (packetSize <= 0) break;           // antrean kosong
-    if (packetSize != 6) continue;        // ukuran salah -> abaikan
+    if (packetSize != 5) continue;        // ukuran salah -> abaikan
 
-    Udp.read(packetBuffer, 6);
-    if (packetBuffer[0] != 0xEA) continue;
-    if (packetBuffer[5] != calculateCRC8(packetBuffer, 5)) continue;
+    Udp.read(packetBuffer, 5);
+    if (packetBuffer[0] != BIND_ID) continue;   // remote lain / paket nyasar
 
     uint16_t seq     = packetBuffer[1] | (packetBuffer[2] << 8);
     int16_t  selisih = (int16_t)(seq - lastSeq);
@@ -624,7 +610,7 @@ void loop() {
   }
 
   // =========================================================
-  // 3. KIRIM TELEMETRI KE ANDROID: [RSSI, VBAT*10, LQ %, CRC8]
+  // 3. KIRIM TELEMETRI KE ANDROID: [BIND_ID, RSSI, VBAT*10, LQ %]
   //    - Ada HP aktif (paket valid < DC_RX ms) : unicast ke IP HP tersebut
   //    - Belum/tidak ada                       : broadcast (discovery), supaya
   //      aplikasi bisa menemukan IP FC di subnet hotspot apa pun
@@ -638,10 +624,10 @@ void loop() {
       rssi = abs(WiFi.RSSI());
     }
 
-    replyBuffer[0] = (uint8_t)rssi;
-    replyBuffer[1] = (uint8_t)(batteryVoltage * 10);
-    replyBuffer[2] = lqPersen;
-    replyBuffer[3] = calculateCRC8(replyBuffer, 3);
+    replyBuffer[0] = BIND_ID;
+    replyBuffer[1] = (uint8_t)rssi;
+    replyBuffer[2] = (uint8_t)(batteryVoltage * 10);
+    replyBuffer[3] = lqPersen;
 
     IPAddress replyIp;
     if (millis() - premillis_rx <= DC_RX) {

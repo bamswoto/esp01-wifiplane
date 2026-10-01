@@ -54,13 +54,13 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 **Link**
 
-* The app sends 6 byte control packets at 250 Hz: `[0xEA, seq lo, seq hi, PWM right, PWM left, CRC8]`, CRC8 seeded with `BIND_ID`.
+* The app sends 5 byte control packets at 250 Hz: `[BIND_ID, seq lo, seq hi, PWM right, PWM left]`. Packets whose first byte isn't the plane's `BIND_ID` are dropped. There is no extra checksum: WiFi already checks every frame with a hardware CRC-32.
 
 * The app picks the mode by itself and shows it on the right. BC (broadcast) when the phone is the hotspot: no WiFi retries, no queue while the plane is the only device on the hotspot. UC (unicast, acked and retried) when the phone is a WiFi client, of the plane's access point or of the home WiFi: there broadcast gains nothing and can be delayed or sent twice.
 
 * The plane uses only the newest packet, drops stale and duplicate ones by sequence number and works out link quality (LQ) from the gaps. It cuts the motors after 900 ms without packets.
 
-* Once a second the plane sends `[RSSI, VBAT*10, LQ %, CRC8]`, broadcast until a phone controls it and unicast after that, so the app finds the plane on its own. In access point mode the plane can't measure RSSI, so the app shows the RSSI the phone measures ("HP").
+* Once a second the plane sends `[BIND_ID, RSSI, VBAT*10, LQ %]`, broadcast until a phone controls it and unicast after that, so the app finds the plane on its own. In access point mode the plane can't measure RSSI, so the app shows the RSSI the phone measures ("HP").
 
 **Controls and safety**
 
