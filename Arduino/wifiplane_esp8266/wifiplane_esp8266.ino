@@ -7,7 +7,7 @@
 // Discovery: telemetri di-broadcast selama belum ada HP yang mengontrol,
 //            setelah itu unicast ke IP HP pengirim paket valid
 // Paket kendali (6 byte): [0xEA, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI, CRC8]
-// Telemetri (5 byte): [P_ID, RSSI, VBAT*10, LQ %, CRC8]
+// Telemetri (4 byte): [RSSI, VBAT*10, LQ %, CRC8]
 //***************************************************
 
 #include <ESP8266WiFi.h>
@@ -15,7 +15,6 @@
 #include <ArduinoOTA.h>
 #include <LittleFS.h>
 
-#define P_ID 1
 #define ST_LED  2
 // Sesuai skema asli Ravi Butani: GPIO4 -> T2 -> MOTOR_R, GPIO5 -> T1 -> MOTOR_L.
 // HP miring kiri -> motor kanan lebih kencang -> pesawat belok kiri.
@@ -157,7 +156,7 @@ unsigned int localPort = 6000;
 unsigned int remotPort = 2390;
 
 uint8_t packetBuffer[10];
-uint8_t replyBuffer[5] = {P_ID, 0x00, 0x00, 0x00, 0x00};   // byte ke-5 = CRC8 telemetri
+uint8_t replyBuffer[4];   // telemetri: [RSSI, VBAT*10, LQ %, CRC8]
 WiFiUDP Udp;
 
 #if RF_KALIBRASI_PENUH
@@ -625,7 +624,7 @@ void loop() {
   }
 
   // =========================================================
-  // 3. KIRIM TELEMETRI KE ANDROID: [P_ID, RSSI, VBAT*10, LQ %, CRC8]
+  // 3. KIRIM TELEMETRI KE ANDROID: [RSSI, VBAT*10, LQ %, CRC8]
   //    - Ada HP aktif (paket valid < DC_RX ms) : unicast ke IP HP tersebut
   //    - Belum/tidak ada                       : broadcast (discovery), supaya
   //      aplikasi bisa menemukan IP FC di subnet hotspot apa pun
@@ -639,10 +638,10 @@ void loop() {
       rssi = abs(WiFi.RSSI());
     }
 
-    replyBuffer[1] = (uint8_t)rssi;
-    replyBuffer[2] = (uint8_t)(batteryVoltage * 10);
-    replyBuffer[3] = lqPersen;
-    replyBuffer[4] = calculateCRC8(replyBuffer, 4);
+    replyBuffer[0] = (uint8_t)rssi;
+    replyBuffer[1] = (uint8_t)(batteryVoltage * 10);
+    replyBuffer[2] = lqPersen;
+    replyBuffer[3] = calculateCRC8(replyBuffer, 3);
 
     IPAddress replyIp;
     if (millis() - premillis_rx <= DC_RX) {
@@ -655,7 +654,7 @@ void loop() {
     }
 
     Udp.beginPacket(replyIp, remotPort);
-    Udp.write(replyBuffer, 5);
+    Udp.write(replyBuffer, 4);
     Udp.endPacket();
   }
 

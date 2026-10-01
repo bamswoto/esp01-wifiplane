@@ -548,16 +548,16 @@ void mouseReleased() {
 
 // =========================================================
 // RECEIVE TELEMETRI dari FC (hypermedia UDP callback)
-// Format: [P_ID, RSSI, VBAT*10, LQ %, CRC8]. Paket valid juga dipakai untuk
+// Format: [RSSI, VBAT*10, LQ %, CRC8]. Paket valid juga dipakai untuk
 // discovery: IP pengirimnya = IP FC.
 // =========================================================
 void receive(byte[] data, String ip, int port) {
-  if (data.length != 5) return;
-  if (calculateCRC8(data, 4) != data[4]) return;
+  if (data.length != 4) return;
+  if (calculateCRC8(data, 3) != data[3]) return;
 
-  rssi = data[1] & 0xFF;
-  vcc  = data[2] & 0xFF;
-  lqFc = data[3] & 0xFF;
+  rssi = data[0] & 0xFF;
+  vcc  = data[1] & 0xFF;
+  lqFc = data[2] & 0xFF;
   lastTelemetryMs = millis();
 
   try {

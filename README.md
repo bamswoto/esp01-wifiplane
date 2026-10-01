@@ -60,7 +60,7 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 * The plane uses only the newest packet, drops stale and duplicate ones by sequence number and works out link quality (LQ) from the gaps. It cuts the motors after 900 ms without packets.
 
-* Once a second the plane sends `[P_ID, RSSI, VBAT*10, LQ %, CRC8]`, broadcast until a phone controls it and unicast after that, so the app finds the plane on its own. In access point mode the plane can't measure RSSI, so the app shows the RSSI the phone measures ("HP").
+* Once a second the plane sends `[RSSI, VBAT*10, LQ %, CRC8]`, broadcast until a phone controls it and unicast after that, so the app finds the plane on its own. In access point mode the plane can't measure RSSI, so the app shows the RSSI the phone measures ("HP").
 
 **Controls and safety**
 
