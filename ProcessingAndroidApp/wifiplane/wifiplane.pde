@@ -5,10 +5,10 @@
 // ELRS-style Packet Integrity (CRC8, nilai awal = BIND_ID) + nomor urut 16-bit
 // Paket kendali (6 byte): [0xEA, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI, CRC8]
 // Discovery: IP FC diambil dari telemetri valid
-// Mode kirim (toggle area kanan-tengah):
-//   BC = broadcast ke subnet FC  (mode STA/hotspot: frame grup, tanpa retry MAC. Tidak ditahan
-//        sampai beacon DTIM selama FC tidak sleep dan tidak ada perangkat lain di hotspot)
-//   UC = unicast ke IP FC        (ACK + retry MAC)
+// Mode kirim otomatis (ditampilkan di area kanan-tengah):
+//   BC = broadcast ke subnet FC, saat HP jadi hotspot (FC mode STA): frame grup, tanpa retry MAC.
+//        Tidak ditahan sampai beacon DTIM selama FC tidak sleep dan tidak ada perangkat lain di hotspot
+//   UC = unicast ke IP FC, saat HP klien Wi-Fi (FC mode AP, atau router rumah): ACK + retry MAC
 // Gas: jari lepas = gas 0 (safety saat pesawat jatuh). Tombol HOLD (kanan-bawah)
 //   menahan gas supaya trim bisa diatur; tekan HOLD lagi = HOLD mati + gas 0.
 //   Gas 0 = kedua motor mati, kemiringan HP dan trim tidak memutar motor.
@@ -67,7 +67,7 @@ volatile int trimKanan    = 0;   // tombol kolom kanan: tambah motor kiri -> bel
 volatile float accelerometerX = 0;
 volatile float diff_power = DIFF_BG;
 
-// Mode kirim: true = BC (broadcast subnet FC), false = UC (unicast)
+// Mode kirim: true = BC (broadcast subnet FC), false = UC (unicast). Dipilih otomatis, lihat pakaiBroadcast()
 volatile boolean kirimBroadcast = true;
 
 // State telemetri: ditulis receiver callback, dibaca UI thread
@@ -174,6 +174,9 @@ void senderLoop() {
   InetAddress fcUntukBc = null;   // IP FC yang broadcast-nya sudah dihitung
   InetAddress bcFc      = null;   // alamat broadcast subnet FC
 
+  InetAddress fcUntukMode = null; // IP FC yang mode kirimnya sudah dipilih
+  long nextModeMs = 0;            // pilih ulang tiap detik (jaringan HP bisa berubah)
+
   int  seq         = 0;           // nomor urut 16-bit, naik tiap paket terkirim
   int  txHitung    = 0;
   long jendelaTxNs = System.nanoTime();
@@ -198,6 +201,12 @@ void senderLoop() {
       InetAddress fa = fcAddr;
       InetAddress target;
       if (fa != null) {
+        long nowModeMs = System.currentTimeMillis();
+        if (!fa.equals(fcUntukMode) || nowModeMs >= nextModeMs) {
+          kirimBroadcast = pakaiBroadcast(fa);
+          fcUntukMode = fa;
+          nextModeMs = nowModeMs + 1000;
+        }
         if (kirimBroadcast) {
           if (!fa.equals(fcUntukBc)) {
             bcFc = broadcastUntuk(fa);
@@ -314,6 +323,39 @@ DatagramSocket buatSocketKirim() throws Exception {
 }
 
 // =========================================================
+// MODE KIRIM OTOMATIS
+// HP jadi hotspot (FC mode STA ke hotspot HP) -> BC: frame grup dari AP, tanpa ACK/retry.
+// HP klien Wi-Fi (FC mode AP, atau HP & FC sama-sama di router rumah) -> UC: kiriman klien
+//   tetap di-ACK dan diulang, broadcast tidak memberi keuntungan, bisa diteruskan ulang oleh
+//   AP ke semua klien dan (di router) ditahan sampai beacon DTIM.
+// Caranya: FC satu subnet dengan Wi-Fi klien HP -> UC, selain itu FC ada di hotspot HP -> BC.
+// =========================================================
+boolean pakaiBroadcast(InetAddress fc) {
+  byte[] f = fc.getAddress();
+  int ip = 0;
+  try {
+    if (wifiMgr != null) ip = wifiMgr.getConnectionInfo().getIpAddress();   // 0 = HP bukan klien Wi-Fi
+  }
+  catch (Exception e) {
+  }
+  if (ip == 0 || f.length != 4) return true;
+  byte[] hp = {(byte) ip, (byte) (ip >> 8), (byte) (ip >> 16), (byte) (ip >> 24)};   // little-endian
+
+  int prefix = 24;   // subnet hotspot Android, softAP ESP dan kebanyakan router rumah
+  try {
+    for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+      for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
+        if (java.util.Arrays.equals(ia.getAddress().getAddress(), hp)) prefix = ia.getNetworkPrefixLength();
+      }
+    }
+  }
+  catch (Exception e) {
+    // pakai asumsi /24
+  }
+  return !samaSubnet(hp, f, prefix);
+}
+
+// =========================================================
 // ALAMAT BROADCAST SUBNET FC
 // Dicari dari interface lokal yang subnetnya memuat IP FC (hotspot atau Wi-Fi klien).
 // Jika gagal, asumsi /24 (subnet hotspot Android dan softAP ESP sama-sama /24).
@@ -389,7 +431,7 @@ void draw() {
   if (exprt_flag == 0) text("BG", width/8, height/2 + height/6);
   else                 text("EX", width/8, height/2 + height/6);
 
-  // Mode kirim (tap area kanan-tengah untuk ganti)
+  // Mode kirim (otomatis, lihat pakaiBroadcast)
   if (kirimBroadcast) text("BC", 3*width/4 + width/8, height/2 + height/6);
   else                text("UC", 3*width/4 + width/8, height/2 + height/6);
 
@@ -504,7 +546,7 @@ void mousePressed() {
       diff_power = DIFF_BG;
     }
   } else if (mouseX > 3*width/4 && mouseY < 3*height/4) {
-    kirimBroadcast = !kirimBroadcast;   // BC <-> UC
+    // Area BC/UC: hanya tampilan, mode kirim dipilih otomatis
   } else if (mouseX > 3*width/4 && mouseY < 7*height/8) {
     // HOLD: aktif = gas ditahan; ditekan lagi = HOLD mati dan gas langsung 0
     if (hold) {

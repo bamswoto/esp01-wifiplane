@@ -40,7 +40,7 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 * The app sends 6 byte control packets at 250 Hz: `[0xEA, seq lo, seq hi, PWM right, PWM left, CRC8]`, CRC8 seeded with `BIND_ID`.
 
-* BC mode broadcasts them (no WiFi retries, no queue while the plane is the only device on the hotspot), UC mode unicasts them (acked and retried).
+* The app picks the mode by itself and shows it on the right. BC (broadcast) when the phone is the hotspot: no WiFi retries, no queue while the plane is the only device on the hotspot. UC (unicast, acked and retried) when the phone is a WiFi client, of the plane's access point or of the home WiFi: there broadcast gains nothing and can be delayed or sent twice.
 
 * The plane uses only the newest packet, drops stale and duplicate ones by sequence number and works out link quality (LQ) from the gaps. It cuts the motors after 900 ms without packets.
 
@@ -50,7 +50,7 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 * Gas: slide on the middle bar. Lifting the finger sets gas to 0, so a crash cuts the motors. At gas 0 both motors are off, whatever the tilt or trim.
 
-* HOLD (bottom right, orange when on, only while ACTIVATED): keeps the gas when the finger lifts, so you can set the trims or switch BG/EX and BC/UC in flight. Tap it again to turn it off, which also sets gas to 0.
+* HOLD (bottom right, orange when on, only while ACTIVATED): keeps the gas when the finger lifts, so you can set the trims or switch BG/EX in flight. Tap it again to turn it off, which also sets gas to 0.
 
 * LOCKED / ACTIVATED (bottom bar) also turns HOLD off and sets gas to 0.
 
