@@ -39,9 +39,9 @@
 // Password upload OTA (Arduino IDE akan memintanya saat upload lewat port jaringan).
 // Tanpa password, siapa pun di jaringan yang sama bisa mengganti firmware.
 #define OTA_PASSWORD "GANTI_PASSWORD_OTA"
-// OTA (dan mDNS) hanya aktif jika remote Android tidak terbuka: tidak ada paket kendali
-// valid selama OTA_TUNDA_MS. Begitu paket remote datang, OTA langsung dimatikan.
-// Berlaku di mode STA maupun AP.
+// OTA (dan mDNS) hanya aktif di mode STA (WiFi rumah / hotspot HP), dan hanya jika
+// remote Android tidak terbuka: tidak ada paket kendali valid selama OTA_TUNDA_MS.
+// Begitu paket remote datang, OTA langsung dimatikan. Di mode AP OTA tidak pernah aktif.
 #define OTA_TUNDA_MS 10000
 
 // =========================================================
@@ -241,16 +241,17 @@ void playKoneksiSound(uint8_t count) {
   }
 }
 
-// --- OTA HANYA SAAT REMOTE ANDROID TIDAK TERBUKA ---
+// --- OTA HANYA DI MODE STA, SAAT REMOTE ANDROID TIDAK TERBUKA ---
 // Remote dianggap terbuka selama paket kendali valid masih datang (aplikasi mengirim
 // 250 Hz dan berhenti 1 detik setelah ditutup/di-pause). Saat boot dihitung dari 0,
 // jadi tanpa remote OTA aktif ~OTA_TUNDA_MS setelah pesawat dinyalakan.
 void aturOTA() {
   bool remoteTerbuka = (millis() - premillis_rx < OTA_TUNDA_MS);
-  if (remoteTerbuka && otaAktif) {
+  bool otaBoleh      = usingSTA && !remoteTerbuka;
+  if (!otaBoleh && otaAktif) {
     ArduinoOTA.end();     // tutup listener OTA dan mDNS
     otaAktif = false;
-  } else if (!remoteTerbuka && !otaAktif) {
+  } else if (otaBoleh && !otaAktif) {
     ArduinoOTA.begin();
     otaAktif = true;
   }
@@ -352,7 +353,7 @@ void setup() {
 void loop() {
   // =========================================================
   // 0. OTA HANDLER  (JANGAN DIUBAH — selalu di paling atas)
-  //    Hanya saat remote Android tidak terbuka (lihat aturOTA)
+  //    Hanya di mode STA, saat remote Android tidak terbuka (lihat aturOTA)
   // =========================================================
   aturOTA();
   if (otaAktif) ArduinoOTA.handle();
