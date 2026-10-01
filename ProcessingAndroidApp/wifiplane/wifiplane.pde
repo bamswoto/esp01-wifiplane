@@ -48,7 +48,7 @@ final float DIFF_BG = 4.0;   // mode BG
 final float DIFF_EX = 7.0;   // mode EX
 
 // Peringatan getar
-final int VBAT_WARN     = 35;    // baterai < 3.5 V (FC memutus motor di 3.0 V)
+final int VBAT_WARN     = 30;    // baterai < 3.0 V, sama dengan batas pemutus motor di FC
 final int LQ_WARN       = 50;    // LQ < 50% saat ACTIVATED
 final int TLM_HILANG_MS = 2000;  // telemetri hilang > 2 detik = link putus
 
