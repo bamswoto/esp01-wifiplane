@@ -1,18 +1,14 @@
 # esp01-wifiplane
 
-Here is the modified code and hardware for esp01 running [RAVI_BUTANI](https://www.instructables.com/member/RAVI_BUTANI/)'s cheapest diy [WIFI-CONTROLLED-RC-PLANE](https://www.instructables.com/id/WIFI-CONTROLLED-RC-PLANE/).
+Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instructables.com/member/RAVI_BUTANI/)'s cheapest diy [WIFI-CONTROLLED-RC-PLANE](https://www.instructables.com/id/WIFI-CONTROLLED-RC-PLANE/).
 
 **Highlights**
 
-* Hardware: Works on esp01's gpio0 and gpio2, both bootstrap pins require pullup on boot, so output is inverted
-
-* Arduino code: Ability to invert outputs and switch gpio pins using define directives
+* Hardware: ESP-12E (or ESP-12F, NodeMCU, Wemos D1 mini) wired as in the [original schematic](Hardware/original-electronics.png). Motors go on gpio5 (D1) and gpio4 (D2), status LED on gpio2.
 
 * Android code: Now also works in home networks (for testing). The [compiled binary](ProcessingAndroidApp/wifiplane.apk) is from before the ExpressLRS style link below and does not work with the current firmware, rebuild the app from `wifiplane.pde` in Processing (Android mode).
 
-**ESP-12E and long range**
-
-* Build: leave `ESP01_BUILD` commented out. Motors go on gpio5 (D1) and gpio4 (D2), status LED on gpio2.
+**Long range**
 
 * `LONG_RANGE` (on by default) locks the radio to 802.11b, which has the most TX power and the best receive sensitivity, sets max TX power (`TX_POWER_DBM`) and disables modem sleep. If the hotspot won't accept 802.11b, the plane switches between 802.11b and 802.11g every 15 s until it connects.
 

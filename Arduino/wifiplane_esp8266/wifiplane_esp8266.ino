@@ -24,30 +24,18 @@
 #define FLAG_ARMED  0x01
 
 //#define SERIAL_DEBUG  //Enable serial debugging
-//#define ESP01_BUILD  //Enable ESP01, leave disabled for ESP-12E / ESP-12F / NodeMCU / Wemos D1 mini
 
 #define LONG_RANGE          //Max range: 802.11b, max TX power, no modem sleep
 #define TX_POWER_DBM   20.5 //0 - 20.5 dBm, lower it if the ESP resets when motors spin up
 #define PHY_SWITCH_MS 15000 //Alternate 802.11b/g while connecting, for hotspots that refuse 802.11b
 
-#ifdef ESP01_BUILD //ESP01 only have gpio0 (bootstrap), gpio2 (bootstrap), gpio1 (TX & LED), gpio3 (RX)
-  #define REVERSE_ON_OFF //bootstrap pins need to be HIGH on boot
-  #define ST_LED  1
-  #define L_MOTOR 0
-  #define R_MOTOR 2
-#else //ESP-12E: onboard LED on gpio2, motors on gpio5 (D1) and gpio4 (D2)
-  #define ST_LED  2
-  #define L_MOTOR 5
-  #define R_MOTOR 4
-#endif
+// ESP-12E / ESP-12F / NodeMCU / Wemos D1 mini
+#define ST_LED  2 // onboard LED
+#define L_MOTOR 5 // D1
+#define R_MOTOR 4 // D2
 
 #define PWM_RANGE 1000 // one step per microsecond of the 1000-2000 us channel value
-
-#ifdef REVERSE_ON_OFF
-  #define MOTOR_OFF PWM_RANGE
-#else
-  #define MOTOR_OFF 0
-#endif //REVERSE_ON_OFF
+#define MOTOR_OFF 0
 
 ADC_MODE(ADC_VCC);
 
@@ -119,11 +107,7 @@ void lqPush(uint8_t received)
 void setMotor(uint8_t pin, uint16_t us)
 {
   us = constrain(us, 1000, 2000);
-#ifdef REVERSE_ON_OFF
-  analogWrite(pin, PWM_RANGE - (us - 1000));
-#else
   analogWrite(pin, us - 1000);
-#endif //REVERSE_ON_OFF
 }
 
 void sendTelemetry()
