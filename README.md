@@ -68,7 +68,7 @@ Ada dua mode kemudi, diganti dengan tombol GANTI MODE saat terkunci:
 
 * MIRING (layar potret): belok dengan memiringkan HP (sensor accelerometer), gas di slider tengah. Tanpa trim.
 
-* MANUAL (layar landscape): gas di slider kiri (ibu jari kiri, geser ke atas), belok di slider horizontal kanan-bawah (ibu jari kanan, geser ke kiri/kanan), trim di atas slider belok.
+* MANUAL (layar landscape): gas di slider kiri (ibu jari kiri, geser ke atas), belok di slider horizontal kanan-bawah (ibu jari kanan, geser ke kiri/kanan), trim dan HOLD di atas slider belok.
 
 Mode MIRING:
 
@@ -78,9 +78,9 @@ Mode MIRING:
 
 Mode MANUAL:
 
-| Terbang, belok kanan | Belok kiri penuh, sinyal lemah |
+| Terbang, belok kanan | HOLD, belok kiri penuh, sinyal lemah |
 |---|---|
-| ![Manual terbang](ProcessingAndroidApp/tampilan/5_manual_terbang.png) | ![Manual sinyal lemah](ProcessingAndroidApp/tampilan/6_manual_sinyal_lemah.png) |
+| ![Manual terbang](ProcessingAndroidApp/tampilan/5_manual_terbang.png) | ![Manual HOLD](ProcessingAndroidApp/tampilan/6_manual_hold_sinyal_lemah.png) |
 
 Gambar di atas dirender dari kode `draw()` yang sama; huruf di HP bisa sedikit berbeda.
 
@@ -94,21 +94,23 @@ Gambar di atas dirender dari kode `draw()` yang sama; huruf di HP bisa sedikit b
 
 * Mode MIRING: output motor kiri dan kanan dalam persen di kiri-kanan slider gas (dihitung dengan rumus yang sama dengan paket yang dikirim), dan indikator kemiringan HP di bawahnya.
 
-* Mode MANUAL: trim kiri dan kanan ([−] nilai [+]) di atas slider belok, supaya bisa diketuk ibu jari kanan. AKTIFKAN di kiri-bawah, jauh dari titik ibu jari kanan.
+* Mode MANUAL: trim kiri dan kanan ([−] nilai [+]) dan HOLD di atas slider belok, supaya bisa diketuk ibu jari kanan selagi ibu jari kiri memegang gas. AKTIFKAN di kiri-bawah, jauh dari titik ibu jari kanan.
 
 * Setiap tombol bergetar singkat saat diketuk.
 
 **Kendali dan keselamatan**
 
-* Multi-touch: setiap jari dibaca sendiri, jadi gas, belok dan tombol bisa dipakai bersamaan, misalnya menahan gas sambil mengetuk trim atau BG/EX dengan jari lain.
+* Multi-touch: setiap jari dibaca sendiri, jadi gas, belok dan tombol bisa dipakai bersamaan, misalnya menahan gas sambil mengetuk HOLD, trim atau BG/EX dengan jari lain.
 
 * Gas: sentuh dan geser slider gas, atas = penuh. Gas langsung mengikuti jari saat slider disentuh, dan hanya jari yang mulai menyentuh di slider saat AKTIF yang mengubah gas; jari lain yang ikut menyentuh slider diabaikan. Jari gas diangkat membuat gas menjadi 0, walaupun jari lain masih menyentuh layar, sehingga motor mati saat pesawat jatuh. Saat gas 0, kedua motor mati, apa pun kemiringan, slider belok dan trim-nya.
 
 * Belok (mode MANUAL): kenop mengikuti jari, ujung slider sama dengan HP miring 90 derajat di mode MIRING, dan BG/EX tetap berlaku. Jari diangkat membuat pesawat lurus lagi. Ada zona mati kecil di tengah. Di mode MANUAL kemiringan HP tidak dipakai.
 
+* HOLD (hanya mode MANUAL, oranye saat aktif, hanya bisa saat AKTIF): gas ditahan walaupun jari diangkat, sehingga ibu jari kiri bebas, misalnya untuk mengatur trim. Ketuk lagi untuk mematikannya, yang juga membuat gas menjadi 0; kalau jari masih di slider gas, angkat dulu untuk memberi gas lagi. Mode MIRING tidak punya HOLD.
+
 * Trim (hanya mode MANUAL): TRIM KIRI menambah motor kanan (pesawat cenderung ke kiri), TRIM KANAN menambah motor kiri. Batas ±30 per trim. Nilainya disimpan di memori aplikasi setiap kali diketuk, jadi tetap ada saat aplikasi ditutup dan dibuka lagi. Di mode MIRING trim tidak dipakai.
 
-* AKTIFKAN / AKTIF mengunci dan membuka kendali. Mengunci membuat gas menjadi 0. Jari yang sudah ada di slider gas saat AKTIFKAN diketuk tidak memberi gas; angkat dan sentuh lagi.
+* AKTIFKAN / AKTIF mengunci dan membuka kendali. Mengunci juga mematikan HOLD dan membuat gas menjadi 0. Jari yang sudah ada di slider gas saat AKTIFKAN diketuk tidak memberi gas; angkat dan sentuh lagi.
 
 * Ganti mode hanya bisa saat terkunci. Saat AKTIF, tombolnya redup dan muncul pesan "Kunci dulu untuk ganti mode". Layar landscape dikunci ke satu arah (tidak ikut sensor), jadi tidak berputar sendiri saat terbang. Kalau bentuk layar tetap berubah saat AKTIF (misalnya layar terpisah), kendali langsung dikunci.
 
