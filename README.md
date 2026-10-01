@@ -52,7 +52,7 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 * The phone vibrates on low battery (below 3.5 V), and while ACTIVATED when the link is lost or LQ is below 50%.
 
-* The plane cuts the motors when the battery stays below 3.2 V for 2 s, so short sags at full throttle don't cut it. Motors come back once the voltage recovers and the gas is back to 0.
+* The plane cuts the motors when the battery stays below 3.0 V (the absolute minimum for a 1S LiPo under load) for 2 s, so short sags at full throttle don't cut it. Motors come back once the voltage recovers and the gas is back to 0.
 
 * When the app is paused (call, screen lock, other app) it locks the controls and sends gas 0 for 1 s, then stops sending and releases its locks.
 

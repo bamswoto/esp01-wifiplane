@@ -3,7 +3,7 @@
 // PROFIL JANGKAUAN MAKSIMUM (latensi boleh lebih tinggi)
 // Optimized with ELRS-style Packet Integrity (CRC8, nilai awal = BIND_ID)
 // Eksternal Voltage Divider: 33k & 8.2k
-// Auto Cut-Off Motor saat Baterai < 3.2V selama 2 detik (latch; re-arm saat perintah HP = 0)
+// Auto Cut-Off Motor saat Baterai < 3.0V selama 2 detik (latch; re-arm saat perintah HP = 0)
 // Discovery: telemetri di-broadcast selama belum ada HP yang mengontrol,
 //            setelah itu unicast ke IP HP pengirim paket valid
 // Paket kendali (6 byte): [0xEA, SEQ lo, SEQ hi, PWM KANAN, PWM KIRI, CRC8]
@@ -65,7 +65,7 @@
 #define EKSP_AP_RATE_1_2M 0
 
 // --- KONFIGURASI BATERAI (LiPo 1S) ---
-#define BATT_MIN_V     3.2    // Motor mati (latch) jika tegangan di bawah ini...
+#define BATT_MIN_V     3.0    // Motor mati (latch) jika tegangan di bawah ini (batas mutlak LiPo 1S)...
 #define BATT_LOW_MS    2000   // ...terus-menerus selama 2 detik (sag sesaat saat gas penuh diabaikan)
 #define BATT_HYST      0.15   // Re-arm hanya jika tegangan > BATT_MIN_V + BATT_HYST
                               // DAN perintah terakhir dari HP = 0 (throttle dilepas / LOCK)
