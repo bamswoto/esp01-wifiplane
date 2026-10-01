@@ -56,21 +56,39 @@ Kode hasil modifikasi untuk ESP-12E yang menjalankan [WIFI-CONTROLLED-RC-PLANE](
 
 * Aplikasi mengirim paket kendali 5 byte pada 250 Hz: `[BIND_ID, seq lo, seq hi, PWM kanan, PWM kiri]`. Paket yang byte pertamanya bukan `BIND_ID` pesawat ini dibuang. Tidak ada checksum tambahan: WiFi sudah mengecek setiap frame dengan CRC-32 di hardware.
 
-* Aplikasi memilih mode kirim sendiri dan menampilkannya di kanan layar. BC (broadcast) saat HP menjadi hotspot: tanpa pengulangan WiFi, tanpa antrean selama pesawat satu-satunya perangkat di hotspot. UC (unicast, dikonfirmasi dan diulang) saat HP menjadi klien WiFi, baik ke access point pesawat maupun ke WiFi rumah: di sana broadcast tidak memberi keuntungan dan bisa tertunda atau terkirim dua kali.
+* Aplikasi memilih mode kirim sendiri dan menampilkannya di bilah status (MODE). BC (broadcast) saat HP menjadi hotspot: tanpa pengulangan WiFi, tanpa antrean selama pesawat satu-satunya perangkat di hotspot. UC (unicast, dikonfirmasi dan diulang) saat HP menjadi klien WiFi, baik ke access point pesawat maupun ke WiFi rumah: di sana broadcast tidak memberi keuntungan dan bisa tertunda atau terkirim dua kali.
 
 * Pesawat hanya memakai paket terbaru, membuang paket basi dan duplikat berdasarkan nomor urut, dan menghitung link quality (LQ) dari nomor yang terlewat. Motor dimatikan setelah 900 ms tanpa paket.
 
 * Sekali per detik pesawat mengirim `[BIND_ID, RSSI, VBAT*10, LQ %]`, lewat broadcast sampai ada HP yang mengendalikannya dan lewat unicast setelahnya, sehingga aplikasi menemukan pesawat dengan sendirinya. Di mode access point pesawat tidak bisa mengukur RSSI, jadi aplikasi menampilkan RSSI yang diukur HP ("HP").
 
+**Tampilan remote**
+
+| Siap | Terbang | HOLD, sinyal lemah | Link putus |
+|---|---|---|---|
+| ![Siap](ProcessingAndroidApp/tampilan/1_siap.png) | ![Terbang](ProcessingAndroidApp/tampilan/2_terbang.png) | ![HOLD](ProcessingAndroidApp/tampilan/3_hold_sinyal_lemah.png) | ![Link putus](ProcessingAndroidApp/tampilan/4_link_putus.png) |
+
+Gambar di atas dirender dari kode `draw()` yang sama; huruf di HP bisa sedikit berbeda.
+
+* Atas: status koneksi ke pesawat (alamat IP, "Mencari pesawat…" atau "Link putus"), lalu sinyal, LQ, baterai (warna hijau/kuning/merah sesuai level) dan mode kirim BC/UC.
+
+* Di bawahnya muncul satu pesan kalau ada yang perlu diperhatikan: link putus, baterai lemah, sinyal lemah, izin kurang, atau petunjuk saat siap terbang.
+
+* Kiri dan kanan: tombol trim, tombol BELOK (BG/EX), tombol HOLD, dan output motor kiri dan kanan dalam persen, dihitung dengan rumus yang sama dengan paket yang dikirim.
+
+* Bawah: indikator belok dari kemiringan HP, dan tombol besar AKTIFKAN / AKTIF.
+
+* Setiap tombol bergetar singkat saat diketuk.
+
 **Kendali dan keselamatan**
 
-* Gas: geser di batang tengah. Jari diangkat membuat gas menjadi 0, sehingga motor mati saat pesawat jatuh. Saat gas 0, kedua motor mati, apa pun kemiringan dan trim-nya.
+* Gas: sentuh dan geser slider tengah, atas = penuh. Gas langsung mengikuti jari saat slider disentuh, dan hanya sentuhan yang dimulai di slider yang mengubah gas. Jari diangkat membuat gas menjadi 0, sehingga motor mati saat pesawat jatuh. Saat gas 0, kedua motor mati, apa pun kemiringan dan trim-nya.
 
-* HOLD (kanan bawah, oranye saat aktif, hanya saat ACTIVATED): gas ditahan walaupun jari diangkat, sehingga trim atau BG/EX bisa diatur saat terbang. Ketuk lagi untuk mematikannya, yang juga membuat gas menjadi 0.
+* HOLD (kanan, oranye saat aktif, hanya saat AKTIF): gas ditahan walaupun jari diangkat, sehingga trim atau BG/EX bisa diatur saat terbang. Ketuk lagi untuk mematikannya, yang juga membuat gas menjadi 0.
 
-* LOCKED / ACTIVATED (batang bawah) juga mematikan HOLD dan membuat gas menjadi 0.
+* AKTIFKAN / AKTIF (tombol bawah) mengunci dan membuka kendali. Mengunci juga mematikan HOLD dan membuat gas menjadi 0.
 
-* HP bergetar saat baterai lemah (di bawah 3,0 V, paling lama 2 detik sebelum pesawat memutus motor), dan saat ACTIVATED ketika link putus atau LQ di bawah 50%.
+* HP bergetar saat baterai lemah (di bawah 3,0 V, paling lama 2 detik sebelum pesawat memutus motor), dan saat AKTIF ketika link putus atau LQ di bawah 50%.
 
 * Pesawat memutus motor saat tegangan baterai bertahan di bawah 3,0 V (batas mutlak LiPo 1S saat dibebani) selama 2 detik, sehingga penurunan sesaat saat gas penuh tidak memutusnya. Motor bisa dipakai lagi setelah tegangan naik dan gas kembali ke 0.
 

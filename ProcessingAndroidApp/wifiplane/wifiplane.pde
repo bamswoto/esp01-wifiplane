@@ -49,7 +49,7 @@ final float DIFF_EX = 7.0;   // mode EX
 
 // Peringatan getar
 final int VBAT_WARN     = 30;    // baterai < 3.0 V, sama dengan batas pemutus motor di FC
-final int LQ_WARN       = 50;    // LQ < 50% saat ACTIVATED
+final int LQ_WARN       = 50;    // LQ < 50% saat AKTIF
 final int TLM_HILANG_MS = 2000;  // telemetri hilang > 2 detik = link putus
 
 // Setelah app ter-pause, kirim 0/0 selama ini lalu berhenti (FC failsafe sendiri)
@@ -101,6 +101,33 @@ Thread senderThread;
 // UI-only state
 int exprt_flag = 0;
 long lastVib   = 0;
+
+// Tampilan: tema gelap
+final int W_LATAR  = 0xFF0E1625;
+final int W_KARTU  = 0xFF1A2537;
+final int W_TEKAN  = 0xFF2B3C55;
+final int W_TEKS   = 0xFFE7EDF5;
+final int W_REDUP  = 0xFF8496AE;
+final int W_BIRU   = 0xFF38BDF8;
+final int W_HIJAU  = 0xFF22C55E;
+final int W_KUNING = 0xFFF5B30B;
+final int W_MERAH  = 0xFFEF4444;
+final int W_ORANYE = 0xFFFB923C;
+final int W_UNGU   = 0xFFA78BFA;
+
+// Area tombol [x, y, lebar, tinggi], dihitung ulang tiap frame oleh aturTata()
+// dan dipakai juga untuk mendeteksi sentuhan
+float[] rTrimKiriTambah  = new float[4];
+float[] rTrimKiriKurang  = new float[4];
+float[] rTrimKananTambah = new float[4];
+float[] rTrimKananKurang = new float[4];
+float[] rMode  = new float[4];
+float[] rHold  = new float[4];
+float[] rGas   = new float[4];
+float[] rAktif = new float[4];
+float u;                     // satuan ukuran: 1% lebar layar
+boolean seretGas = false;    // sentuhan dimulai di slider gas
+float[] rDitekan = null;     // tombol yang sedang ditekan (efek tekan)
 volatile String peringatan = "";   // lock/izin yang gagal, ditampilkan di layar
 
 // --- Konfigurasi jaringan ---
@@ -271,24 +298,22 @@ void senderLoop() {
 // LOCK atau gas 0 = kedua motor 0 (kemiringan HP dan trim tidak memutar motor)
 // =========================================================
 void isiPaket(byte[] buf, int seq, int g, int tKiri, int tKanan, float ax, float dp, int lk) {
-  // --- Mixing seperti kode asli ---
-  // HP miring kiri (ax > 0) -> motor kanan lebih kencang -> pesawat belok kiri
-  int kanan = (int)((float)g + (float)tKiri + ax * dp);
-  int kiri  = (int)((float)g + (float)tKanan - ax * dp);
-
-  int pwmKanan = constrain(kanan * 2, 0, 255);
-  int pwmKiri  = constrain(kiri * 2, 0, 255);
-
   buf[0] = (byte) BIND_ID;
   buf[1] = (byte) (seq & 0xFF);
   buf[2] = (byte) ((seq >> 8) & 0xFF);
   if (lk == 1 && g > 0) {
-    buf[3] = (byte) pwmKanan;
-    buf[4] = (byte) pwmKiri;
+    // HP miring kiri (ax > 0) -> motor kanan lebih kencang -> pesawat belok kiri
+    buf[3] = (byte) pwmMotor(g, tKiri, ax * dp);
+    buf[4] = (byte) pwmMotor(g, tKanan, -ax * dp);
   } else {
     buf[3] = (byte) 0x00;
     buf[4] = (byte) 0x00;
   }
+}
+
+// PWM satu motor (0-254), mixing seperti kode asli. Dipakai paket dan indikator motor di layar.
+int pwmMotor(int g, int trim, float belok) {
+  return constrain((int)((float)g + (float)trim + belok) * 2, 0, 255);
 }
 
 // =========================================================
@@ -374,86 +399,69 @@ boolean samaSubnet(byte[] a, byte[] b, int prefix) {
 }
 
 // =========================================================
+// TATA LETAK (layar potret). Semua ukuran relatif terhadap layar.
+// =========================================================
+void aturTata() {
+  u = width / 100.0;
+  float m  = 4 * u;                    // margin tepi
+  float jk = 3 * u;                    // jarak antar kolom
+  float kolom = 24 * u;                // lebar kolom kiri/kanan
+  float y0 = 0.215 * height;           // awal area utama
+  float y1 = 0.795 * height;           // akhir area utama
+  float xKanan = width - m - kolom;
+  float tTombol = 0.08 * height;
+
+  isi(rTrimKiriTambah,  m,      y0 + 0.03 * height,  kolom, tTombol);
+  isi(rTrimKiriKurang,  m,      y0 + 0.17 * height,  kolom, tTombol);
+  isi(rTrimKananTambah, xKanan, y0 + 0.03 * height,  kolom, tTombol);
+  isi(rTrimKananKurang, xKanan, y0 + 0.17 * height,  kolom, tTombol);
+  isi(rMode,            m,      y0 + 0.275 * height, kolom, 0.085 * height);
+  isi(rHold,            xKanan, y0 + 0.275 * height, kolom, 0.085 * height);
+  isi(rGas, m + kolom + jk, y0, width - 2 * (m + kolom + jk), y1 - y0);
+  isi(rAktif, m, 0.865 * height, width - 2 * m, height - m - 0.865 * height);
+}
+
+void isi(float[] r, float x, float y, float w, float h) {
+  r[0] = x;
+  r[1] = y;
+  r[2] = w;
+  r[3] = h;
+}
+
+boolean di(float[] r) {
+  return mouseX >= r[0] && mouseX <= r[0] + r[2] && mouseY >= r[1] && mouseY <= r[1] + r[3];
+}
+
+// =========================================================
 // DRAW — hanya UI, tidak mengirim paket
 // =========================================================
 void draw() {
-  background(125, 255, 200);
-  fill(255);
-  stroke(163);
-  rect(0, 0, width/4, height/4);
-  rect(3*width/4, 0, width/4, height/4);
-  rect(0, height/4, width/4, height/4);
-  rect(3*width/4, height/4, width/4, height/4);
-  rect(0, 7*height/8, width, height/8);
-
-  // Tombol HOLD (kanan-bawah), oranye saat aktif
-  fill(hold ? color(255, 170, 0) : 255);
-  rect(3*width/4, 3*height/4, width/4, height/8);
-
-  fill(color(255, 100, 60));
-  rect(width/4, 0, width/2, 7*height/8);
-  fill(color(100, 150, 255));
-  rect(width/4, 0, width/2, ((7*height)/8) - (gas*7*height)/(8*127));
-
-  textSize(height/12);
-  textAlign(CENTER, CENTER);
-  fill(color(50, 100, 255));
-  text("+", width/8, height/8 - 10);
-  text("-", width/8, 3*height/8 - 10);
-  text("+", 3*width/4 + width/8, height/8 - 10);
-  text("-", 3*width/4 + width/8, 3*height/8 - 10);
-
-  fill(0);
-  text(gas*100/127, width/2, height/2);
-  text(trimKiri, width/8, height/4 - 10);
-  text(trimKanan, 3*width/4 + width/8, height/4 - 10);
-
-  if (exprt_flag == 0) text("BG", width/8, height/2 + height/6);
-  else                 text("EX", width/8, height/2 + height/6);
-
-  // Mode kirim (otomatis, lihat pakaiBroadcast)
-  if (kirimBroadcast) text("BC", 3*width/4 + width/8, height/2 + height/6);
-  else                text("UC", 3*width/4 + width/8, height/2 + height/6);
-
-  if (lock == 0) text("LOCKED", width/2, 7*height/8 + height/16);
-  else           text("ACTIVATED", width/2, 7*height/8 + height/16);
-
-  textSize(height/24);
-  text(hold ? "HOLD ON" : "HOLD", 3*width/4 + width/8, 3*height/4 + height/16);
-
-  // RSSI: dari FC (mode STA), atau diukur HP sendiri saat FC mode AP (FC kirim 0)
+  aturTata();
   boolean tlmAda = millis() - lastTelemetryMs <= TLM_HILANG_MS;
 
-  textSize(height/14);
-  fill(255);
-  if (rssi != 0)                  text("-" + rssi + "dBm", width/2, 3*height/4);
-  else if (tlmAda && rssiHp != 0) text("-" + rssiHp + "dBm HP", width/2, 3*height/4);
-  else                            text("-" + Character.toString('∞') + "dBm", width/2, 3*height/4);
-  text((vcc/10) + "." + (vcc%10) + "V", width/2, 3*height/4 + height/12);
+  background(W_LATAR);
+  noStroke();
+  gambarKepala(tlmAda);
+  gambarPeringatan(tlmAda);
+  gambarTrim(rTrimKiriTambah, rTrimKiriKurang, "TRIM KIRI", trimKiri);
+  gambarTrim(rTrimKananTambah, rTrimKananKurang, "TRIM KANAN", trimKanan);
+  gambarTombolMode();
+  gambarTombolHold();
+  gambarGas();
 
-  fill(0);
-  textSize(height/30);
-  text("Instructables", width/2, height/20);
-  text("WiFi Plane App", width/2, 2*height/20);
-  text("By Ravi Butani", width/2, 3*height/20);
+  // Output motor, dihitung dengan rumus yang sama seperti paket
+  float belok = accelerometerX * diff_power;
+  boolean jalan = lock == 1 && gas > 0;
+  float yMotor = rMode[1] + rMode[3] + 0.025 * height;
+  float tMotor = rGas[1] + rGas[3] - yMotor;
+  gambarMotor(rMode[0], yMotor, rMode[2], tMotor, "MOTOR KIRI", jalan ? pwmMotor(gas, trimKanan, -belok) : 0);
+  gambarMotor(rHold[0], yMotor, rHold[2], tMotor, "MOTOR KANAN", jalan ? pwmMotor(gas, trimKiri, belok) : 0);
 
-  // Status discovery FC
-  InetAddress fa = fcAddr;
-  if (fa == null) text("FC: mencari...", width/2, 4*height/20);
-  else            text("FC: " + fa.getHostAddress(), width/2, 4*height/20);
-
-  // Link quality: % paket diterima FC dari nomor urut, dan paket dikirim HP per detik
-  text("LQ: " + lqFc + "% (tx " + txPerDetik + "/s)", width/2, 5*height/20);
-
-  // Lock/izin yang gagal
-  String p = peringatan;
-  if (p.length() > 0) {
-    fill(color(200, 0, 0));
-    text("Izin kurang: " + p, width/2, 6*height/20);
-  }
+  gambarBelok();
+  gambarTombolAktif();
 
   // Getar (time-based, tidak blocking UI):
-  //   baterai lemah kapan saja; link putus atau LQ rendah saat ACTIVATED
+  //   baterai lemah kapan saja; link putus atau LQ rendah saat AKTIF
   boolean bahaya = (vcc > 0 && vcc < VBAT_WARN) || (lock == 1 && (!tlmAda || lqFc < LQ_WARN));
   if (bahaya && millis() - lastVib > 1500) {
     lastVib = millis();
@@ -469,6 +477,312 @@ void draw() {
 }
 
 // =========================================================
+// KOMPONEN TAMPILAN
+// =========================================================
+void kartu(float[] r, int warna) {
+  fill(warna);
+  rect(r[0], r[1], r[2], r[3], 3 * u);
+}
+
+int warnaKartu(float[] r) {
+  return r == rDitekan ? W_TEKAN : W_KARTU;
+}
+
+void gambarKepala(boolean tlmAda) {
+  float m = 4 * u;
+  textAlign(LEFT, CENTER);
+  fill(W_TEKS);
+  textSize(5.5 * u);
+  text("WiFi Plane", m, m + 0.018 * height);
+  fill(W_REDUP);
+  textSize(2.6 * u);
+  text("desain asli Ravi Butani \u00b7 Instructables", m, m + 0.047 * height);
+
+  // Status koneksi ke pesawat
+  InetAddress fa = fcAddr;
+  String status;
+  int warna;
+  if (fa == null) {
+    status = "Mencari pesawat\u2026";
+    warna = W_KUNING;
+  } else if (!tlmAda) {
+    status = "Link putus";
+    warna = W_MERAH;
+  } else {
+    status = fa.getHostAddress();
+    warna = W_HIJAU;
+  }
+  textSize(3 * u);
+  float lebar = textWidth(status) + 9 * u;
+  float tinggi = 0.036 * height;
+  float x = width - m - lebar;
+  float y = m + 0.018 * height - tinggi / 2;
+  fill(warna, 40);
+  rect(x, y, lebar, tinggi, tinggi / 2);
+  fill(warna);
+  ellipse(x + 3.5 * u, y + tinggi / 2, 2 * u, 2 * u);
+  textAlign(LEFT, CENTER);
+  text(status, x + 6 * u, y + tinggi / 2);
+
+  // Empat chip: sinyal, LQ, baterai, mode kirim
+  float yc = 0.085 * height;
+  float hc = 0.07 * height;
+  float jc = 2 * u;
+  float wc = (width - 2 * m - 3 * jc) / 4;
+  for (int k = 0; k < 4; k++) {
+    fill(W_KARTU);
+    rect(m + k * (wc + jc), yc, wc, hc, 3 * u);
+  }
+  float yl = yc + 0.018 * height;
+  float yv = yc + 0.047 * height;
+
+  // Sinyal: RSSI dari FC (mode STA), atau diukur HP saat FC mode AP (FC kirim 0)
+  int nilaiRssi = rssi != 0 ? rssi : (tlmAda ? rssiHp : 0);
+  float x0 = m;
+  label(rssi == 0 && nilaiRssi != 0 ? "SINYAL HP" : "SINYAL", x0 + wc / 2, yl);
+  int bar = nilaiRssi == 0 ? 0 : nilaiRssi <= 55 ? 4 : nilaiRssi <= 65 ? 3 : nilaiRssi <= 75 ? 2 : nilaiRssi <= 85 ? 1 : 0;
+  ikonSinyal(x0 + 2.5 * u, yv + 1.6 * u, 3.2 * u, bar);
+  nilaiSetelahIkon(nilaiRssi == 0 ? "--" : "-" + nilaiRssi + " dBm", x0 + 7.5 * u, yv, W_TEKS);
+
+  // LQ
+  x0 += wc + jc;
+  label("LQ", x0 + wc / 2, yl);
+  int wLq = !tlmAda ? W_REDUP : lqFc >= 80 ? W_HIJAU : lqFc >= LQ_WARN ? W_KUNING : W_MERAH;
+  nilai(tlmAda ? lqFc + "%" : "--", x0 + wc / 2, yv, wLq);
+
+  // Baterai
+  x0 += wc + jc;
+  label("BATERAI", x0 + wc / 2, yl);
+  int wBat = vcc == 0 ? W_REDUP : vcc >= 37 ? W_HIJAU : vcc >= 33 ? W_KUNING : W_MERAH;
+  ikonBaterai(x0 + 2.5 * u, yv - 1.4 * u, 4.5 * u, 2.8 * u, vcc == 0 ? 0 : constrain((vcc - 30) / 12.0, 0, 1), wBat);
+  nilaiSetelahIkon(vcc == 0 ? "-- V" : (vcc / 10) + "." + (vcc % 10) + " V", x0 + 9 * u, yv, wBat);
+
+  // Mode kirim (otomatis, lihat pakaiBroadcast)
+  x0 += wc + jc;
+  label("MODE", x0 + wc / 2, yl);
+  nilai(kirimBroadcast ? "BC" : "UC", x0 + wc / 2, yv, W_BIRU);
+}
+
+void label(String t, float x, float y) {
+  fill(W_REDUP);
+  textSize(2.4 * u);
+  textAlign(CENTER, CENTER);
+  text(t, x, y);
+}
+
+void nilai(String t, float x, float y, int warna) {
+  fill(warna);
+  textSize(3.6 * u);
+  textAlign(CENTER, CENTER);
+  text(t, x, y);
+}
+
+// Nilai rata kiri, di sebelah ikon
+void nilaiSetelahIkon(String t, float x, float y, int warna) {
+  fill(warna);
+  textSize(3.3 * u);
+  textAlign(LEFT, CENTER);
+  text(t, x, y);
+}
+
+void ikonSinyal(float x, float yBawah, float tinggi, int level) {
+  float w = tinggi / 5;
+  for (int k = 0; k < 4; k++) {
+    float h = tinggi * (k + 1) / 4;
+    fill(k < level ? W_HIJAU : W_TEKAN);
+    rect(x + k * w * 1.4, yBawah - h, w, h, w / 3);
+  }
+}
+
+void ikonBaterai(float x, float y, float w, float h, float level, int warna) {
+  noFill();
+  stroke(warna);
+  strokeWeight(0.35 * u);
+  rect(x, y, w, h, 0.6 * u);
+  noStroke();
+  fill(warna);
+  rect(x + w, y + h * 0.3, 0.5 * u, h * 0.4);
+  rect(x + 0.6 * u, y + 0.6 * u, (w - 1.2 * u) * level, h - 1.2 * u, 0.3 * u);
+}
+
+// Satu pesan terpenting di bawah bilah status; kosong kalau semua baik
+void gambarPeringatan(boolean tlmAda) {
+  String pesan = "";
+  int warna = W_REDUP;
+  String p = peringatan;
+  if (lock == 1 && !tlmAda) {
+    pesan = "LINK PUTUS \u2014 motor mati otomatis";
+    warna = W_MERAH;
+  } else if (vcc > 0 && vcc < VBAT_WARN) {
+    pesan = "BATERAI LEMAH \u2014 segera mendarat";
+    warna = W_MERAH;
+  } else if (lock == 1 && lqFc < LQ_WARN) {
+    pesan = "SINYAL LEMAH (LQ " + lqFc + "%) \u2014 dekatkan pesawat";
+    warna = W_KUNING;
+  } else if (p.length() > 0) {
+    pesan = "Izin kurang: " + p;
+    warna = W_KUNING;
+  } else if (lock == 0 && tlmAda) {
+    pesan = "Siap. Ketuk AKTIFKAN untuk mulai terbang";
+    warna = W_REDUP;
+  }
+  if (pesan.length() == 0) return;
+  float m = 4 * u;
+  float y = 0.165 * height;
+  float h = 0.04 * height;
+  fill(warna, warna == W_REDUP ? 25 : 45);
+  rect(m, y, width - 2 * m, h, h / 2);
+  fill(warna == W_REDUP ? W_REDUP : warna);
+  textSize(3 * u);
+  textAlign(CENTER, CENTER);
+  text(pesan, width / 2, y + h / 2);
+}
+
+void gambarTrim(float[] rTambah, float[] rKurang, String judul, int nilaiTrim) {
+  label(judul, rTambah[0] + rTambah[2] / 2, rTambah[1] - 0.015 * height);
+  kartu(rTambah, warnaKartu(rTambah));
+  kartu(rKurang, warnaKartu(rKurang));
+  fill(W_TEKS);
+  textSize(8 * u);
+  textAlign(CENTER, CENTER);
+  text("+", rTambah[0] + rTambah[2] / 2, rTambah[1] + rTambah[3] / 2);
+  text("\u2212", rKurang[0] + rKurang[2] / 2, rKurang[1] + rKurang[3] / 2);
+  float yNilai = (rTambah[1] + rTambah[3] + rKurang[1]) / 2;
+  fill(nilaiTrim == 0 ? W_REDUP : W_TEKS);
+  textSize(6 * u);
+  text((nilaiTrim > 0 ? "+" : "") + nilaiTrim, rTambah[0] + rTambah[2] / 2, yNilai);
+}
+
+void gambarTombolMode() {
+  boolean ex = exprt_flag == 1;
+  kartu(rMode, warnaKartu(rMode));
+  label("BELOK", rMode[0] + rMode[2] / 2, rMode[1] + 0.02 * height);
+  fill(ex ? W_UNGU : W_BIRU);
+  textSize(6 * u);
+  textAlign(CENTER, CENTER);
+  text(ex ? "EX" : "BG", rMode[0] + rMode[2] / 2, rMode[1] + 0.055 * height);
+}
+
+void gambarTombolHold() {
+  if (hold) {
+    fill(W_ORANYE);
+    rect(rHold[0], rHold[1], rHold[2], rHold[3], 3 * u);
+  } else {
+    kartu(rHold, warnaKartu(rHold));
+  }
+  fill(hold ? W_LATAR : (lock == 1 ? W_TEKS : W_REDUP));
+  textSize(2.4 * u);
+  textAlign(CENTER, CENTER);
+  text(hold ? "GAS DITAHAN" : "TAHAN GAS", rHold[0] + rHold[2] / 2, rHold[1] + 0.02 * height);
+  textSize(6 * u);
+  text("HOLD", rHold[0] + rHold[2] / 2, rHold[1] + 0.055 * height);
+}
+
+void gambarGas() {
+  kartu(rGas, W_KARTU);
+  float x = rGas[0], y = rGas[1], w = rGas[2], h = rGas[3];
+  // Isi gas dari bawah
+  int warna = lock == 0 ? W_REDUP : hold ? W_ORANYE : W_BIRU;
+  float hIsi = h * gas / 127.0;
+  float yIsi = y + h - hIsi;
+  if (hIsi > 0) {
+    fill(warna, 210);
+    rect(x, yIsi, w, hIsi, 3 * u);
+    fill(W_TEKS);
+    rect(x + 6 * u, yIsi - 0.4 * u, w - 12 * u, 0.8 * u, 0.4 * u);
+  }
+  // Tanda skala 25/50/75% di kedua tepi
+  fill(W_TEKS, 70);
+  for (int k = 1; k <= 3; k++) {
+    rect(x, y + h * k / 4, 3 * u, 0.3 * u);
+    rect(x + w - 3 * u, y + h * k / 4, 3 * u, 0.3 * u);
+  }
+  label("GAS", x + w / 2, y + 0.02 * height);
+  textAlign(CENTER, CENTER);
+  if (lock == 0) {
+    fill(W_REDUP);
+    textSize(5 * u);
+    text("TERKUNCI", x + w / 2, y + h / 2);
+  } else {
+    float yTeks = y + h * 0.42;
+    fill(W_TEKS);
+    textSize(13 * u);
+    text(round(gas * 100 / 127.0) + "%", x + w / 2, yTeks);
+    // Di atas isian gas tulisan dibuat terang supaya tetap terbaca
+    fill(yIsi < yTeks + 9 * u ? W_TEKS : W_REDUP, yIsi < yTeks + 9 * u ? 220 : 255);
+    textSize(2.8 * u);
+    text(hold ? "GAS DITAHAN" : "geser untuk gas", x + w / 2, yTeks + 9 * u);
+  }
+}
+
+void gambarMotor(float x, float y, float w, float h, String judul, int pwm) {
+  fill(W_KARTU);
+  rect(x, y, w, h, 3 * u);
+  label(judul, x + w / 2, y + 0.02 * height);
+  float bx = x + w / 2 - 3 * u;
+  float by = y + 0.04 * height;
+  float bh = h - 0.04 * height - 0.045 * height;
+  fill(W_TEKAN);
+  rect(bx, by, 6 * u, bh, 1.5 * u);
+  float hIsi = bh * pwm / 254.0;
+  if (hIsi > 0) {
+    fill(W_BIRU);
+    rect(bx, by + bh - hIsi, 6 * u, hIsi, 1.5 * u);
+  }
+  nilai(round(pwm * 100 / 254.0) + "%", x + w / 2, y + h - 0.022 * height, pwm > 0 ? W_TEKS : W_REDUP);
+}
+
+// Indikator belok dari kemiringan HP (setelah deadzone)
+void gambarBelok() {
+  float m = 4 * u;
+  float y = 0.81 * height;
+  float h = 0.04 * height;
+  float w = width - 2 * m;
+  fill(W_KARTU);
+  rect(m, y, w, h, h / 2);
+  fill(W_TEKAN);
+  rect(width / 2 - 0.25 * u, y + h * 0.2, 0.5 * u, h * 0.6);
+  fill(W_REDUP);
+  textSize(2.4 * u);
+  textAlign(LEFT, CENTER);
+  text("\u2190 KIRI", m + 3 * u, y + h / 2);
+  textAlign(RIGHT, CENTER);
+  text("KANAN \u2192", width - m - 3 * u, y + h / 2);
+  float ax = accelerometerX;
+  float pos = constrain(-ax / 8.3, -1, 1);   // ax > 0 = HP miring kiri
+  fill(ax == 0 ? W_REDUP : W_BIRU);
+  ellipse(width / 2 + pos * (w / 2 - h), y + h / 2, h * 0.75, h * 0.75);
+}
+
+void gambarTombolAktif() {
+  boolean aktif = lock == 1;
+  if (aktif) {
+    fill(rAktif == rDitekan ? 0xFF16A34A : W_HIJAU);
+    rect(rAktif[0], rAktif[1], rAktif[2], rAktif[3], 4 * u);
+  } else {
+    kartu(rAktif, warnaKartu(rAktif));
+    noFill();
+    stroke(W_MERAH);
+    strokeWeight(0.5 * u);
+    rect(rAktif[0], rAktif[1], rAktif[2], rAktif[3], 4 * u);
+    noStroke();
+  }
+  float cx = rAktif[0] + rAktif[2] / 2;
+  float cy = rAktif[1] + rAktif[3] / 2;
+  textAlign(CENTER, CENTER);
+  fill(aktif ? W_LATAR : W_TEKS);
+  textSize(7 * u);
+  text(aktif ? "AKTIF" : "AKTIFKAN", cx, cy - 1.5 * u);
+  fill(aktif ? 0xFF0B3B1F : W_REDUP);
+  textSize(2.8 * u);
+  text(aktif ? "ketuk untuk mengunci" : "pesawat terkunci, motor mati", cx, cy + 4.5 * u);
+}
+
+void getar(int ms) {
+  if (vibe != null) vibe.vibrate(ms);
+}
+
+// =========================================================
 // SENSOR CALLBACK
 // =========================================================
 void onAccelerometerEvent(float x, float y, float z) {
@@ -481,19 +795,28 @@ void onAccelerometerEvent(float x, float y, float z) {
 
 // =========================================================
 // INPUT
+// Gas: sentuhan yang dimulai di slider gas, jari lepas = gas 0 (kecuali HOLD).
+// Tombol lain bereaksi saat disentuh, dengan getar singkat.
 // =========================================================
-void mouseDragged() {
-  if (mouseY < 7*height/8 && mouseX > width/4 && mouseX < 3*width/4 && lock == 1) {
-    gas = 127 - (int)(((float)mouseY / ((float)(7*height/8))) * (float)127);
-  }
-}
-
 void mousePressed() {
-  if (mouseX < width/4 && mouseY < height/4)              trimKiri++;
-  else if (mouseX < width/4 && mouseY < height/2)         trimKiri--;
-  else if (mouseX > 3*width/4 && mouseY < height/4)       trimKanan++;
-  else if (mouseX > 3*width/4 && mouseY < height/2)       trimKanan--;
-  else if (mouseX < width/4 && mouseY < 3*height/4) {
+  aturTata();
+  rDitekan = null;
+  if (di(rGas)) {
+    seretGas = true;
+    aturGas();
+  } else if (di(rTrimKiriTambah)) {
+    trimKiri++;
+    tekan(rTrimKiriTambah);
+  } else if (di(rTrimKiriKurang)) {
+    trimKiri--;
+    tekan(rTrimKiriKurang);
+  } else if (di(rTrimKananTambah)) {
+    trimKanan++;
+    tekan(rTrimKananTambah);
+  } else if (di(rTrimKananKurang)) {
+    trimKanan--;
+    tekan(rTrimKananKurang);
+  } else if (di(rMode)) {
     if (exprt_flag == 0) {
       exprt_flag = 1;
       diff_power = DIFF_EX;
@@ -501,27 +824,48 @@ void mousePressed() {
       exprt_flag = 0;
       diff_power = DIFF_BG;
     }
-  } else if (mouseX > 3*width/4 && mouseY < 3*height/4) {
-    // Area BC/UC: hanya tampilan, mode kirim dipilih otomatis
-  } else if (mouseX > 3*width/4 && mouseY < 7*height/8) {
+    tekan(rMode);
+  } else if (di(rHold)) {
     // HOLD: aktif = gas ditahan; ditekan lagi = HOLD mati dan gas langsung 0
     if (hold) {
       hold = false;
       gas  = 0;
+      tekan(rHold);
     } else if (lock == 1) {
       hold = true;
+      tekan(rHold);
     }
-  } else if (mouseY > 7*height/8) {
+  } else if (di(rAktif)) {
     gas  = 0;
     hold = false;
     if (lock == 0) lock = 1;
     else           lock = 0;
+    tekan(rAktif);
+  }
+}
+
+void mouseDragged() {
+  if (seretGas) {
+    aturTata();
+    aturGas();
   }
 }
 
 void mouseReleased() {
+  seretGas = false;
+  rDitekan = null;
   // Jari lepas = gas 0 (safety saat pesawat jatuh), kecuali HOLD aktif
   if (!hold) gas = 0;
+}
+
+// Posisi jari di slider -> gas 0-127 (atas = penuh). Hanya saat AKTIF.
+void aturGas() {
+  if (lock == 1) gas = constrain(round(127 * (rGas[1] + rGas[3] - mouseY) / rGas[3]), 0, 127);
+}
+
+void tekan(float[] r) {
+  rDitekan = r;
+  getar(12);
 }
 
 // =========================================================
@@ -701,10 +1045,12 @@ void onPause() {
   // App ter-pause (panggilan masuk, layar mati, pindah app): kunci kendali.
   // Sender thread mengirim 0/0 selama KIRIM_SETELAH_PAUSE_MS -> motor langsung mati,
   // tanpa menunggu failsafe FC, lalu berhenti mengirim. Lock Wi-Fi dilepas supaya
-  // baterai HP tidak terkuras di background. Setelah kembali, tekan ACTIVATED lagi.
+  // baterai HP tidak terkuras di background. Setelah kembali, tekan AKTIFKAN lagi.
   gas      = 0;
   hold     = false;
   lock     = 0;
+  seretGas = false;
+  rDitekan = null;
   pauseMs  = System.currentTimeMillis();
   appAktif = false;
   lepasLocks();
