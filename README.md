@@ -16,6 +16,18 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 * Max TX power draws 170 mA or more in peaks. Use a low dropout regulator rated for 500 mA or more with a 470 µF+ capacitor next to the module, or the ESP may reset when the motors spin up.
 
+**Phone**
+
+An app can't change the phone's WiFi TX power, data rate or antenna, so these settings make the link steadier rather than longer.
+
+* The app keeps the screen on, since a screen timeout pauses the app and failsafes the plane. It also holds a low latency WiFi lock so the phone WiFi doesn't power save. The lock only matters when the phone is a WiFi client (external access point), not when it is the hotspot.
+
+* Hotspot: use the 2.4 GHz band and turn off "turn off hotspot automatically".
+
+* External access point: turn on airplane mode, then WiFi, so Android doesn't move the traffic to mobile data because the access point has no internet.
+
+* Turn battery saver off, and keep your hand off the phone edges where the WiFi antenna usually is.
+
 **ExpressLRS style link**
 
 The app and the plane talk the way an ELRS transmitter and receiver do, over UDP on the same WiFi. Flash the firmware and install the rebuilt app together, the old packets are not accepted.

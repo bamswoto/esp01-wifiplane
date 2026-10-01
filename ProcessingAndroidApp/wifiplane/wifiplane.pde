@@ -9,6 +9,10 @@ import hypermedia.net.*; // import UDP library
 import ketai.sensors.*;  // import Ketai Sensor library
 import ketai.ui.*;
 import ketai.net.*;
+import android.content.Context;
+import android.net.wifi.WifiManager;
+import android.os.Build;
+import android.view.WindowManager;
 
 // ExpressLRS style link, see the plane firmware for the packet layout
 int PACKET_RATE_HZ = 50;           // fixed RC packet rate, sent from its own thread
@@ -37,6 +41,7 @@ int lastVibeMillis = 0;
 UDP udp;             // define the UDP object
 KetaiSensor sensor;  // define the Ketai sensor object
 KetaiVibrate vibe;
+WifiManager.WifiLock wifiLock;
 volatile float accelerometerX;
 float accelerometerY, accelerometerZ;
 int exprt_flag = 0;
@@ -63,6 +68,8 @@ void setup()
 {
   size(displayWidth,displayHeight);
   orientation(PORTRAIT);
+  keepScreenOn();
+  createWifiLock();
   crcSeed = bindSeed(BIND_PHRASE);
   udp = new UDP( this, localPort );
   udp.listen( true );
@@ -137,6 +144,37 @@ void draw()
     vibe.vibrate(500);
     lastVibeMillis = millis();
   }
+}
+
+// The screen going off pauses the app, which stops the RC packets and failsafes the plane mid flight
+void keepScreenOn()
+{
+  runOnUiThread(new Runnable() {
+    public void run() {
+      getActivity().getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+  });
+}
+
+// Keeps the phone WiFi out of power save so packets are not delayed or missed near the edge of range.
+// Works when the phone is a WiFi client (access point or plane AP), a phone hotspot is not affected.
+void createWifiLock()
+{
+  WifiManager wm = (WifiManager) getActivity().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+  // WIFI_MODE_FULL_LOW_LATENCY (4) on Android 10+, WIFI_MODE_FULL_HIGH_PERF (3) before
+  wifiLock = wm.createWifiLock(Build.VERSION.SDK_INT >= 29 ? 4 : 3, "wifiplane");
+  wifiLock.setReferenceCounted(false);
+  wifiLock.acquire();
+}
+
+void pause()
+{
+  if (wifiLock != null) wifiLock.release();
+}
+
+void resume()
+{
+  if (wifiLock != null) wifiLock.acquire();
 }
 
 // Sends RC packets at PACKET_RATE_HZ no matter how fast the screen redraws
