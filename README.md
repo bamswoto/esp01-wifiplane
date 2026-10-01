@@ -16,7 +16,7 @@ Kode hasil modifikasi untuk ESP-12E yang menjalankan [WIFI-CONTROLLED-RC-PLANE](
 
 * Samakan `BIND_ID` di sketch dan aplikasi, supaya HP atau pesawat lain yang memakai kode ini tidak bisa mengendalikan pesawat Anda.
 
-* Build ulang aplikasi dari `ProcessingAndroidApp/wifiplane/wifiplane.pde` di Processing (mode Android). File `wifiplane.apk` bawaan adalah versi lama dan tidak bisa dipakai dengan firmware ini. Izin yang dibutuhkan aplikasi ada di `AndroidManifest.xml`, dan izin yang kurang ditampilkan di layar.
+* Build ulang aplikasi dari `ProcessingAndroidApp/wifiplane/wifiplane.pde` di Processing (mode Android). File `wifiplane.apk` bawaan adalah versi lama dan tidak bisa dipakai dengan firmware ini. Izin yang dibutuhkan aplikasi ada di `AndroidManifest.xml`, dan izin yang kurang ditampilkan di layar. File itu juga berisi `android:configChanges` supaya aplikasi tidak restart saat ganti mode MIRING / MANUAL, jadi pakai file itu dan jangan buat ulang.
 
 **Mode WiFi**
 
@@ -64,9 +64,23 @@ Kode hasil modifikasi untuk ESP-12E yang menjalankan [WIFI-CONTROLLED-RC-PLANE](
 
 **Tampilan remote**
 
+Ada dua mode kemudi:
+
+* MIRING (layar potret): belok dengan memiringkan HP, gas di slider tengah.
+
+* MANUAL (layar landscape): gas di slider kiri (ibu jari kiri, geser ke atas), belok di slider horizontal kanan-bawah (ibu jari kanan, geser ke kiri/kanan).
+
+Mode MIRING:
+
 | Siap | Terbang | HOLD, sinyal lemah | Link putus |
 |---|---|---|---|
 | ![Siap](ProcessingAndroidApp/tampilan/1_siap.png) | ![Terbang](ProcessingAndroidApp/tampilan/2_terbang.png) | ![HOLD](ProcessingAndroidApp/tampilan/3_hold_sinyal_lemah.png) | ![Link putus](ProcessingAndroidApp/tampilan/4_link_putus.png) |
+
+Mode MANUAL:
+
+| Terbang, belok kanan | HOLD, belok kiri penuh, sinyal lemah |
+|---|---|
+| ![Manual terbang](ProcessingAndroidApp/tampilan/5_manual_terbang.png) | ![Manual HOLD](ProcessingAndroidApp/tampilan/6_manual_hold_sinyal_lemah.png) |
 
 Gambar di atas dirender dari kode `draw()` yang sama; huruf di HP bisa sedikit berbeda.
 
@@ -74,19 +88,29 @@ Gambar di atas dirender dari kode `draw()` yang sama; huruf di HP bisa sedikit b
 
 * Di bawahnya muncul satu pesan kalau ada yang perlu diperhatikan: link putus, baterai lemah, sinyal lemah, izin kurang, atau petunjuk saat siap terbang.
 
-* Kiri dan kanan: tombol trim, tombol BELOK (BG/EX), tombol HOLD, dan output motor kiri dan kanan dalam persen, dihitung dengan rumus yang sama dengan paket yang dikirim.
+* Tombol trim, tombol BELOK (BG/EX), tombol HOLD, dan output motor kiri dan kanan dalam persen, dihitung dengan rumus yang sama dengan paket yang dikirim.
 
-* Bawah: indikator belok dari kemiringan HP, dan tombol besar AKTIFKAN / AKTIF.
+* Mode MIRING: indikator belok dari kemiringan HP di bawah slider gas. Mode MANUAL: slider belok di kanan-bawah, tepat di bawah tombol HOLD.
+
+* Tombol ganti mode: MANUAL (potret, di samping indikator belok) dan MIRING (landscape, di samping chip status). Ikonnya menunjukkan posisi HP setelah diganti.
+
+* Tombol AKTIFKAN / AKTIF.
 
 * Setiap tombol bergetar singkat saat diketuk.
 
 **Kendali dan keselamatan**
 
-* Gas: sentuh dan geser slider tengah, atas = penuh. Gas langsung mengikuti jari saat slider disentuh, dan hanya sentuhan yang dimulai di slider yang mengubah gas. Jari diangkat membuat gas menjadi 0, sehingga motor mati saat pesawat jatuh. Saat gas 0, kedua motor mati, apa pun kemiringan dan trim-nya.
+* Multi-touch: setiap jari dibaca sendiri, jadi gas, belok dan tombol bisa dipakai bersamaan, misalnya menahan gas sambil mengetuk HOLD atau trim dengan jari lain.
 
-* HOLD (kanan, oranye saat aktif, hanya saat AKTIF): gas ditahan walaupun jari diangkat, sehingga trim atau BG/EX bisa diatur saat terbang. Ketuk lagi untuk mematikannya, yang juga membuat gas menjadi 0.
+* Gas: sentuh dan geser slider gas, atas = penuh. Gas langsung mengikuti jari saat slider disentuh, dan hanya jari yang mulai menyentuh di slider saat AKTIF yang mengubah gas; jari lain yang ikut menyentuh slider diabaikan. Jari gas diangkat membuat gas menjadi 0, walaupun jari lain masih menyentuh layar, sehingga motor mati saat pesawat jatuh. Saat gas 0, kedua motor mati, apa pun kemiringan, slider belok dan trim-nya.
 
-* AKTIFKAN / AKTIF (tombol bawah) mengunci dan membuka kendali. Mengunci juga mematikan HOLD dan membuat gas menjadi 0.
+* Belok (mode MANUAL): kenop mengikuti jari, ujung slider sama dengan HP miring 90 derajat di mode MIRING, dan BG/EX tetap berlaku. Jari diangkat membuat pesawat lurus lagi. Ada zona mati kecil di tengah. Di mode MANUAL kemiringan HP tidak dipakai.
+
+* HOLD (oranye saat aktif, hanya saat AKTIF): gas ditahan walaupun jari diangkat, sehingga trim atau BG/EX bisa diatur saat terbang. Ketuk lagi untuk mematikannya, yang juga membuat gas menjadi 0; kalau jari masih di slider gas, angkat dulu untuk memberi gas lagi.
+
+* AKTIFKAN / AKTIF mengunci dan membuka kendali. Mengunci juga mematikan HOLD dan membuat gas menjadi 0. Jari yang sudah ada di slider gas saat AKTIFKAN diketuk tidak memberi gas; angkat dan sentuh lagi.
+
+* Ganti mode hanya bisa saat terkunci. Saat AKTIF, tombolnya redup dan muncul pesan "Kunci dulu untuk ganti mode". Layar landscape dikunci ke satu arah (tidak ikut sensor), jadi tidak berputar sendiri saat terbang. Kalau bentuk layar tetap berubah saat AKTIF (misalnya layar terpisah), kendali langsung dikunci.
 
 * HP bergetar saat baterai lemah (di bawah 3,0 V, paling lama 2 detik sebelum pesawat memutus motor), dan saat AKTIF ketika link putus atau LQ di bawah 50%.
 
