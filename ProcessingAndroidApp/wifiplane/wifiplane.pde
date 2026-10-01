@@ -454,7 +454,6 @@ void draw() {
     fill(color(200, 0, 0));
     text("Izin kurang: " + p, width/2, 6*height/20);
   }
-  textSize(height/12);
 
   // Getar (time-based, tidak blocking UI):
   //   baterai lemah kapan saja; link putus atau LQ rendah saat ACTIVATED

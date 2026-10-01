@@ -155,7 +155,7 @@ const char* pass_ap  = "PASSWORD_AP_FC";   // minimal 8 karakter
 unsigned int localPort = 6000;
 unsigned int remotPort = 2390;
 
-uint8_t packetBuffer[10];
+uint8_t packetBuffer[6];    // paket kendali 6 byte
 uint8_t replyBuffer[4];   // telemetri: [RSSI, VBAT*10, LQ %, CRC8]
 WiFiUDP Udp;
 
