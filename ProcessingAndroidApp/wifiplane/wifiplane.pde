@@ -23,13 +23,15 @@
 //   ACCESS_NETWORK_STATE, CHANGE_NETWORK_STATE
 //   Izin yang kurang ditampilkan di layar.
 // AndroidManifest.xml: activity memakai android:configChanges (orientation|screenSize|...)
-//   supaya ganti mode MANUAL/MIRING tidak me-restart aplikasi.
+//   supaya ganti mode MANUAL/MIRING tidak me-restart aplikasi. Tanpa itu ganti mode tetap
+//   jalan, tapi Android membuat ulang aplikasi (trim dan BG/EX kembali ke awal).
 //***************************************************
 
 import hypermedia.net.*;
 import ketai.sensors.*;
 import ketai.ui.*;
 import android.content.Context;
+import android.content.pm.ActivityInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -177,8 +179,11 @@ WifiManager.WifiLock wifiLock;
 // =========================================================
 void setup() {
   size(displayWidth, displayHeight);
-  orientation(PORTRAIT);   // mulai di mode MIRING. Rotasi tidak membuat ulang activity
-                           // (configChanges di AndroidManifest.xml), jadi state tetap.
+  // Mulai di mode MIRING (potret). Kalau Android membuat ulang activity setelah tombol MANUAL
+  // (manifest tanpa configChanges), setup() jalan lagi: tetap landscape, jangan paksa potret.
+  if (getActivity().getRequestedOrientation() != ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE) {
+    orientation(PORTRAIT);
+  }
 
   keepScreenOn();
   setupPowerAndWifiLocks();
@@ -1349,6 +1354,16 @@ void onDestroy() {
   if (connMgr != null && netCallback != null) {
     try {
       connMgr.unregisterNetworkCallback(netCallback);
+    }
+    catch (Exception e) {
+    }
+  }
+
+  // Tutup socket telemetri: kalau Android membuat ulang activity, port 2390 harus bebas
+  // untuk socket baru
+  if (udp != null) {
+    try {
+      udp.close();
     }
     catch (Exception e) {
     }
