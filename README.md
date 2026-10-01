@@ -12,7 +12,7 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 **Before flashing**
 
-* In the sketch, fill in `ssid_sta` / `pass_sta` (phone hotspot), `pass_ap` (8+ characters) and `OTA_PASSWORD`. Don't commit real passwords.
+* In the sketch, fill in `ssid_sta` / `pass_sta` (home WiFi for OTA, or the phone hotspot), `pass_ap` (8+ characters) and `OTA_PASSWORD`. Don't commit real passwords.
 
 * Set the same `BIND_ID` in the sketch and the app, so another phone or plane running this code can't control yours.
 
@@ -20,9 +20,11 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 **WiFi modes**
 
-* At power up the plane tries the phone hotspot for 8 s (3 beeps when connected). Turn the hotspot on before powering the plane.
+* At power up the plane tries `ssid_sta` for 8 s (3 beeps when connected). Near the home WiFi this is the mode for OTA updates (Arduino IDE port `wifiplane-ota`, asks for `OTA_PASSWORD`).
 
-* Otherwise it becomes an access point `wifiplane` on the least busy of channels 1, 6 and 11 (2 beeps). Connect the phone to it.
+* Otherwise it becomes an access point `wifiplane` on the least busy of channels 1, 6 and 11 (2 beeps), the mode for flying. Connect the phone to it. OTA and mDNS are off in this mode so they don't disturb the flight.
+
+* The mode is picked once at power up and kept until the plane is switched off.
 
 **Range settings (firmware)**
 

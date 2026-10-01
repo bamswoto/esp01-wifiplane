@@ -113,8 +113,8 @@ IPAddress ipHP;
 bool      adaIpHP = false;
 
 // --- KONFIGURASI WIFI (isi sendiri, jangan di-commit ke repo publik) ---
-const char* ssid_sta = "NAMA_HOTSPOT_HP";
-const char* pass_sta = "PASSWORD_HOTSPOT_HP";
+const char* ssid_sta = "NAMA_WIFI_STA";        // WiFi modem rumah (untuk OTA) atau hotspot HP
+const char* pass_sta = "PASSWORD_WIFI_STA";
 
 const char* ssid_ap  = "wifiplane";
 const char* pass_ap  = "PASSWORD_AP_FC";   // minimal 8 karakter
@@ -258,7 +258,7 @@ void setup() {
   playESCStartupSound();
 
   // =========================================================
-  // PRIORITAS 1: COBA KONEK SEBAGAI STA (ke hotspot HP)
+  // PRIORITAS 1: COBA KONEK SEBAGAI STA (WiFi modem rumah untuk OTA, atau hotspot HP)
   // =========================================================
   WiFi.mode(WIFI_STA);
   terapkanSettingRadio();          // setelah WiFi.mode(), sebelum WiFi.begin()
@@ -313,32 +313,36 @@ void setup() {
 #endif
 
   // --- KONFIGURASI ARDUINO OTA (JANGAN DIUBAH) ---
-  ArduinoOTA.setHostname("wifiplane-ota");
-  ArduinoOTA.setPassword(OTA_PASSWORD);
+  // OTA hanya di mode STA (flash lewat WiFi modem rumah). Di mode AP (terbang)
+  // OTA dan mDNS tidak dijalankan supaya tidak mengganggu penerbangan.
+  if (usingSTA) {
+    ArduinoOTA.setHostname("wifiplane-ota");
+    ArduinoOTA.setPassword(OTA_PASSWORD);
 
-  ArduinoOTA.onStart([]() {
-    // Matikan motor demi keselamatan saat proses upload firmware via OTA
-    analogWrite(MOTOR_KANAN, 0);
-    analogWrite(MOTOR_KIRI, 0);
-    digitalWrite(ST_LED, LOW);
-  });
+    ArduinoOTA.onStart([]() {
+      // Matikan motor demi keselamatan saat proses upload firmware via OTA
+      analogWrite(MOTOR_KANAN, 0);
+      analogWrite(MOTOR_KIRI, 0);
+      digitalWrite(ST_LED, LOW);
+    });
 
-  ArduinoOTA.onEnd([]() {
-    analogWrite(MOTOR_KANAN, 0);
-    analogWrite(MOTOR_KIRI, 0);
-    digitalWrite(ST_LED, HIGH);
-  });
+    ArduinoOTA.onEnd([]() {
+      analogWrite(MOTOR_KANAN, 0);
+      analogWrite(MOTOR_KIRI, 0);
+      digitalWrite(ST_LED, HIGH);
+    });
 
-  ArduinoOTA.begin();
+    ArduinoOTA.begin();
+  }
 
   premillis_lq = millis();
 }
 
 void loop() {
   // =========================================================
-  // 0. OTA HANDLER  (JANGAN DIUBAH — selalu di paling atas)
+  // 0. OTA HANDLER  (JANGAN DIUBAH — selalu di paling atas; hanya mode STA)
   // =========================================================
-  ArduinoOTA.handle();
+  if (usingSTA) ArduinoOTA.handle();
   // =========================================================
   // 1. TERIMA PAKET UDP DENGAN VALIDASI CRC8 ALA ELRS
   //    Antrean dikuras tiap loop; hanya paket valid TERBARU yang dipakai.
