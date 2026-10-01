@@ -9,18 +9,22 @@
 #include <WiFiUdp.h>
 
 #define P_ID 1
-#define DC_RSSI 1500  // Time in mS for send RSSI
+#define DC_RSSI 500   // Time in mS for send RSSI, app drops back to broadcast after ~3s without it
 #define DC_RX   900   // Time in mS for tx inactivity 200 old problem of motor stopping flickring
 
 //#define SERIAL_DEBUG  //Enable serial debugging
-#define ESP01_BUILD  //Enable ESP01
+//#define ESP01_BUILD  //Enable ESP01, leave disabled for ESP-12E / ESP-12F / NodeMCU / Wemos D1 mini
+
+#define LONG_RANGE          //Max range: 802.11b, max TX power, no modem sleep
+#define TX_POWER_DBM   20.5 //0 - 20.5 dBm, lower it if the ESP resets when motors spin up
+#define PHY_SWITCH_MS 15000 //Alternate 802.11b/g while connecting, for hotspots that refuse 802.11b
 
 #ifdef ESP01_BUILD //ESP01 only have gpio0 (bootstrap), gpio2 (bootstrap), gpio1 (TX & LED), gpio3 (RX)
   #define REVERSE_ON_OFF //bootstrap pins need to be HIGH on boot
   #define ST_LED  1
   #define L_MOTOR 0
   #define R_MOTOR 2
-#else
+#else //ESP-12E: onboard LED on gpio2, motors on gpio5 (D1) and gpio4 (D2)
   #define ST_LED  2
   #define L_MOTOR 5
   #define R_MOTOR 4
@@ -52,8 +56,14 @@ WiFiUDP Udp;
 
 // the setup function runs once when you press reset or power the board
 void setup() {
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
-  //WiFi.setOutputPower(2.5);
+#ifdef LONG_RANGE
+  WiFi.setPhyMode(WIFI_PHY_MODE_11B);  // 802.11b: highest TX power and best RX sensitivity (down to 1 Mbps)
+  WiFi.setOutputPower(TX_POWER_DBM);
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);  // modem sleep delays and drops control packets
+#endif //LONG_RANGE
+  WiFi.setAutoReconnect(true);
   analogWriteFreq(5000);
   analogWriteRange(255);
   pinMode(L_MOTOR, OUTPUT);
@@ -66,6 +76,7 @@ void setup() {
   Serial.begin(115200);
 #endif //SERIAL_DEBUG
   WiFi.begin(ssid, pass);
+  unsigned long premillis_phy = millis();
   while (WiFi.status() != WL_CONNECTED) 
   {
     digitalWrite(ST_LED,LOW);
@@ -75,6 +86,19 @@ void setup() {
 #ifdef SERIAL_DEBUG
     Serial.print(".");
 #endif //SERIAL_DEBUG
+#ifdef LONG_RANGE
+    if(millis()-premillis_phy > PHY_SWITCH_MS)
+    {
+      premillis_phy = millis();
+      WiFi.disconnect();
+      WiFi.setPhyMode(WiFi.getPhyMode() == WIFI_PHY_MODE_11B ? WIFI_PHY_MODE_11G : WIFI_PHY_MODE_11B);
+      WiFi.setOutputPower(TX_POWER_DBM);
+      WiFi.begin(ssid, pass);
+    #ifdef SERIAL_DEBUG
+      Serial.print(WiFi.getPhyMode() == WIFI_PHY_MODE_11B ? "[11b]" : "[11g]");
+    #endif //SERIAL_DEBUG
+    }
+#endif //LONG_RANGE
   }
   remotIp=WiFi.localIP();
   remotIp[3] = 255;
@@ -87,9 +111,8 @@ void loop() {
   if(WiFi.status() == WL_CONNECTED)
   {
     digitalWrite(ST_LED,LOW);
-    // if there's data available, read a packet
-    int packetSize = Udp.parsePacket();
-    if (packetSize) 
+    // read all queued packets so the newest command is applied without lag
+    while (Udp.parsePacket())
     {
       // read the packet into packetBufffer
       int len = Udp.read(packetBuffer, 10);
@@ -113,6 +136,7 @@ void loop() {
           analogWrite(L_MOTOR,l_speed);
           analogWrite(R_MOTOR,r_speed);
           premillis_rx = millis();
+          remotIp = Udp.remoteIP(); // unicast telemetry is acked and retried, broadcast is not
         }
       }
       
