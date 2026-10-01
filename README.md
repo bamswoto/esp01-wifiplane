@@ -36,6 +36,14 @@ Here is the modified code for an ESP-12E running [RAVI_BUTANI](https://www.instr
 
 * Safe mode only helps if the new firmware still contains it and crashes after it starts. Keep the safe mode code in every version you upload.
 
+**Rollback**
+
+* A failed OTA upload (connection lost, wrong password, MD5 mismatch, battery pulled during the upload) never touches the running firmware: the new image goes to free flash first and is only copied in after its MD5 checks out. Don't cut the power for about 10 s after an upload finishes, while the bootloader copies it.
+
+* For an upload that succeeds but crashes, the plane keeps a copy of the last good firmware. Select a Flash Size with a file system in the Arduino IDE, for example "4MB (FS:1MB OTA:~1019KB)"; without one, rollback is off and a crash loop only leads to safe mode.
+
+* A firmware that has run 2 minutes without crashing (`VERSI_BAIK_MS`) is copied to the file system, once per version, only while the remote app is closed. On the 3rd crash in a row the plane installs that copy (checked by MD5) and restarts with it. With no copy, or a copy of the crashing version itself, it goes to safe mode.
+
 **Range settings (firmware)**
 
 * 802.11b only, modem sleep off, full RF calibration at every power up, TX power at the top of the PHY table (19.5 dBm).

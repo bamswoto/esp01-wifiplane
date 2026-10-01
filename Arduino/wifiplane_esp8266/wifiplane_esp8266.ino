@@ -1,5 +1,5 @@
 //***************************************************
-// WiFi Controlled Tiny Airplane with OTA (STA priority + AP fallback + mode aman anti boot-loop)
+// WiFi Controlled Tiny Airplane with OTA (STA priority + AP fallback + rollback + mode aman)
 // PROFIL JANGKAUAN MAKSIMUM (latensi boleh lebih tinggi)
 // Binding ala ELRS: CRC8 dengan nilai awal BIND_ID (integritas data sudah dijamin CRC-32 hardware WiFi)
 // Eksternal Voltage Divider: 33k & 8.2k
@@ -13,6 +13,7 @@
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
+#include <LittleFS.h>
 
 #define P_ID 1
 #define ST_LED  2
@@ -54,6 +55,17 @@
 #define STABIL_MS  30000      // jalan normal selama ini -> hitungan crash kembali 0
 #define RTC_BLOK   100        // blok RTC user memory (blok 0-31 dipakai core saat OTA)
 #define RTC_MAGIC  0x57504C4EUL
+
+// --- ROLLBACK KE VERSI BAIK TERAKHIR ---
+// Butuh Flash Size dengan FS di Arduino IDE, misalnya "4MB (FS:1MB OTA:~1019KB)".
+// Tanpa FS fitur ini nonaktif sendiri (crash berulang -> mode aman saja).
+// Firmware yang sudah jalan VERSI_BAIK_MS tanpa crash disalin ke FS: sekali per versi,
+// hanya saat remote tertutup, dibatalkan begitu remote dibuka. Saat CRASH_MAKS crash
+// berturut-turut, salinan itu dipasang lagi lewat Updater (dicek MD5) lalu restart.
+// Tidak ada salinan, salinannya versi ini sendiri, atau gagal -> mode aman.
+#define VERSI_BAIK_MS   120000
+#define FILE_VERSI_BAIK "/versi_baik.bin"   // 32 byte MD5 (hex) + image firmware
+#define FILE_VERSI_TMP  "/versi_baik.tmp"
 
 // =========================================================
 // PROFIL JANGKAUAN
@@ -124,6 +136,12 @@ int  hasilSupRate = -1;
 
 bool otaAktif = false;   // ArduinoOTA.begin() sudah dipanggil (end() crash jika belum)
 bool sudahStabil = false;   // hitungan crash sudah di-nol-kan setelah STABIL_MS
+
+// --- Rollback ---
+File     fileSimpan;              // salinan versi ini yang sedang ditulis ke FS
+uint32_t posSimpan     = 0;
+bool     simpanSelesai = false;   // versi ini sudah tersimpan, atau tidak bisa disimpan
+uint8_t  bufVersi[1024];          // buffer salin (global: stack ESP8266 hanya 4 KB)
 
 // --- IP HP yang sedang mengontrol (tujuan telemetri unicast) ---
 IPAddress ipHP;
@@ -278,6 +296,88 @@ bool cekBootLoop() {
   return jumlah >= CRASH_MAKS;
 }
 
+// --- ROLLBACK: SIMPAN & PASANG KEMBALI VERSI BAIK TERAKHIR ---
+// MD5 versi baik yang tersimpan, "" kalau tidak ada. LittleFS harus sudah begin().
+String md5VersiBaik() {
+  File f = LittleFS.open(FILE_VERSI_BAIK, "r");
+  if (!f) return "";
+  char md5[33] = {0};
+  bool ok = (f.readBytes(md5, 32) == 32);
+  f.close();
+  return ok ? String(md5) : "";
+}
+
+// Dipanggil tiap loop(): salin firmware yang sedang jalan ke FS, 1 KB per loop.
+void simpanVersiBaik() {
+  if (simpanSelesai || millis() < VERSI_BAIK_MS) return;
+  if (millis() - premillis_rx < OTA_TUNDA_MS || batteryLow) {
+    if (fileSimpan) {             // remote dibuka saat menyalin: batalkan, ulang nanti
+      fileSimpan.close();
+      LittleFS.remove(FILE_VERSI_TMP);
+    }
+    return;
+  }
+  if (!fileSimpan) {
+    if (!LittleFS.begin() || md5VersiBaik() == ESP.getSketchMD5()) {
+      simpanSelesai = true;       // tanpa FS, atau versi ini sudah tersimpan
+      return;
+    }
+    String md5 = ESP.getSketchMD5();
+    fileSimpan = LittleFS.open(FILE_VERSI_TMP, "w");
+    if (!fileSimpan || md5.length() != 32 || fileSimpan.write((const uint8_t*)md5.c_str(), 32) != 32) {
+      if (fileSimpan) fileSimpan.close();
+      simpanSelesai = true;
+      return;
+    }
+    posSimpan = 0;
+    return;
+  }
+  uint32_t ukuran = ESP.getSketchSize();
+  size_t n = ukuran - posSimpan;
+  if (n > sizeof(bufVersi)) n = sizeof(bufVersi);
+  if (!ESP.flashRead(posSimpan, bufVersi, n) || fileSimpan.write(bufVersi, n) != n) {
+    fileSimpan.close();
+    LittleFS.remove(FILE_VERSI_TMP);
+    simpanSelesai = true;
+    return;
+  }
+  posSimpan += n;
+  if (posSimpan >= ukuran) {
+    fileSimpan.close();
+    LittleFS.remove(FILE_VERSI_BAIK);
+    LittleFS.rename(FILE_VERSI_TMP, FILE_VERSI_BAIK);
+    simpanSelesai = true;
+#if DEBUG_SERIAL
+    Serial.printf("\nVersi baik tersimpan: %s\n", ESP.getSketchMD5().c_str());
+#endif
+  }
+}
+
+// Pasang kembali versi baik terakhir lalu restart. Kembali hanya kalau tidak bisa.
+void kembaliKeVersiBaik() {
+  if (!LittleFS.begin()) return;
+  String md5 = md5VersiBaik();
+  if (md5.length() != 32 || md5 == ESP.getSketchMD5()) return;   // tidak ada, atau versi ini sendiri
+  File f = LittleFS.open(FILE_VERSI_BAIK, "r");
+  if (!f || f.size() <= 32) return;
+  f.seek(32);
+  if (Update.begin(f.size() - 32)) {
+    Update.setMD5(md5.c_str());
+    while (f.available()) {
+      size_t n = f.read(bufVersi, sizeof(bufVersi));
+      if (n == 0 || Update.write(bufVersi, n) != n) break;
+      yield();
+    }
+  }
+  f.close();
+  if (Update.end()) {             // MD5 cocok: bootloader menyalin versi baik saat restart
+#if DEBUG_SERIAL
+    Serial.printf("\nRollback ke versi baik: %s\n", md5.c_str());
+#endif
+    ESP.restart();
+  }
+}
+
 // --- MODE WIFI ---
 // Coba konek STA maksimal STA_TUNGGU_MS (LED berkedip). true = tersambung.
 bool cobaSTA() {
@@ -378,7 +478,10 @@ void setup() {
   pinMode(ST_LED, OUTPUT);
   digitalWrite(ST_LED, HIGH);
 
-  if (masukModeAman) jalankanModeAman();   // tidak kembali
+  if (masukModeAman) {
+    kembaliKeVersiBaik();   // restart dengan versi baik terakhir kalau ada
+    jalankanModeAman();     // tidak kembali
+  }
 
   playESCStartupSound();
 
@@ -438,6 +541,9 @@ void loop() {
     simpanCrash(0);
     sudahStabil = true;
   }
+
+  // Simpan versi ini sebagai versi baik untuk rollback (saat remote tertutup)
+  simpanVersiBaik();
   // =========================================================
   // 1. TERIMA PAKET UDP DENGAN VALIDASI CRC8 ALA ELRS
   //    Antrean dikuras tiap loop; hanya paket valid TERBARU yang dipakai.
